@@ -190,6 +190,12 @@ defmodule Rexsilient.CircuitBreaker do
     end
   end
 
+  @doc false
+  def wrap_run(func, {_mod, _name, _args}, opts) do
+    {breaker_name, breaker_opts} = Keyword.pop!(opts, :name)
+    run(breaker_name, func, breaker_opts)
+  end
+
   defp rejected(opts) do
     case Keyword.fetch(opts, :fallback) do
       {:ok, fallback} when is_function(fallback, 0) -> fallback.()
