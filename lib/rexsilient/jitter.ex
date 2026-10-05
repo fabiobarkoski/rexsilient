@@ -27,8 +27,13 @@ defmodule Rexsilient.Jitter do
       # a random integer from 0 to 800
 
   """
+  @spec full(
+          base_delay :: non_neg_integer(),
+          max_delay :: non_neg_integer(),
+          attempt :: non_neg_integer()
+        ) :: non_neg_integer()
   def full(base_delay, max_delay, attempt) do
-    backoff = min(base_delay * (2 ** attempt), max_delay)
+    backoff = min(base_delay * 2 ** attempt, max_delay)
     Enum.random(0..backoff)
   end
 
@@ -45,8 +50,13 @@ defmodule Rexsilient.Jitter do
       # a random value from 400 to 800
 
   """
+  @spec equal(
+          base_delay :: non_neg_integer(),
+          max_delay :: non_neg_integer(),
+          attempt :: non_neg_integer()
+        ) :: non_neg_integer()
   def equal(base_delay, max_delay, attempt) do
-    backoff = min(base_delay * (2 ** attempt), max_delay)
+    backoff = min(base_delay * 2 ** attempt, max_delay)
     div(backoff, 2) + Enum.random(0..round(backoff / 2))
   end
 
@@ -66,7 +76,12 @@ defmodule Rexsilient.Jitter do
       Rexsilient.Jitter.decorrelated(100, 10_000, delay)
 
   """
+  @spec decorrelated(
+          base_delay :: non_neg_integer(),
+          max_delay :: non_neg_integer(),
+          previous_delay :: non_neg_integer()
+        ) :: non_neg_integer()
   def decorrelated(base_delay, max_delay, previous_delay) do
-    min(Enum.random(base_delay..(previous_delay*3)), max_delay)
+    min(Enum.random(base_delay..(previous_delay * 3)), max_delay)
   end
 end

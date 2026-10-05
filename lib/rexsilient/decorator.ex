@@ -72,27 +72,31 @@ defmodule Rexsilient.Decorator do
   def __on_definition__(env, kind, name, args, _guards, _body) do
     pending =
       for {attr, {mod, func}} <- @decorators,
-        value = Module.get_attribute(env.module, attr),
-        value not in [nil, false] do
-      Module.delete_attribute(env.module, attr)
-      {attr, {mod, func, normalize_opts!(env, attr, value, name)}}
+          value = Module.get_attribute(env.module, attr),
+          value not in [nil, false] do
+        Module.delete_attribute(env.module, attr)
+        {attr, {mod, func, normalize_opts!(env, attr, value, name)}}
       end
+
     cond do
       pending == [] ->
         :ok
+
       kind != :def ->
         compile_error!(
           env,
           "Decorators are only supported on def, got #{kind} #{name}"
         )
+
       true ->
         arity = length(args)
 
         for {_attr, decorator} <- pending do
           Module.put_attribute(env.module, :__decorated__, {name, arity, decorator})
         end
+
         :ok
-      end
+    end
   end
 
   @doc false
@@ -129,17 +133,18 @@ defmodule Rexsilient.Decorator do
         end
       end)
 
-      quote do
-        defoverridable [{unquote(name), unquote(arity)}]
+    quote do
+      defoverridable [{unquote(name), unquote(arity)}]
 
-        def unquote(name)(unquote_splicing(args)) do
-          unquote(body)
-        end
+      def unquote(name)(unquote_splicing(args)) do
+        unquote(body)
       end
+    end
   end
 
   defp normalize_opts!(_env, _attr, value, _name) when is_atom(value),
     do: [name: value]
+
   defp normalize_opts!(env, attr, value, name) do
     if Keyword.keyword?(value) do
       value
@@ -153,7 +158,7 @@ defmodule Rexsilient.Decorator do
 
   defp decorators_have_func?(env) do
     for {decorator_name, _decorator} <- @decorators,
-      Module.get_attribute(env.module, decorator_name) not in [nil, false] do
+        Module.get_attribute(env.module, decorator_name) not in [nil, false] do
       compile_error!(
         env,
         "@#{decorator_name} is not followed by a function definition"

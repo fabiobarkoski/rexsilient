@@ -2,8 +2,8 @@ defmodule Rexsilient.CircuitBreakerTest.Breakers do
   use Rexsilient
 
   circuit_breaker :cb_test do
-    timeout 50
-    threshold 3
+    timeout(50)
+    threshold(3)
   end
 end
 
@@ -85,7 +85,9 @@ defmodule Rexsilient.CircuitBreakerTest do
 
     test "on_open: replaces the rejection value" do
       trip!()
-      assert CB.run(@name, fn -> :ok end, on_open: {:error, :unavailable}) == {:error, :unavailable}
+
+      assert CB.run(@name, fn -> :ok end, on_open: {:error, :unavailable}) ==
+               {:error, :unavailable}
     end
 
     test "fallback: is called on rejection" do

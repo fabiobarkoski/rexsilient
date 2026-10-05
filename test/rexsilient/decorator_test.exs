@@ -2,8 +2,8 @@ defmodule Rexsilient.DecoratorTest.Breakers do
   use Rexsilient
 
   circuit_breaker :decorated do
-    timeout 50
-    threshold 2
+    timeout(50)
+    threshold(2)
   end
 end
 

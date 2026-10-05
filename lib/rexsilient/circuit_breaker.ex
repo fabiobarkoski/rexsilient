@@ -69,6 +69,9 @@ defmodule Rexsilient.CircuitBreaker do
 
   @state_mask (1 <<< 61) - 1
 
+  @typedoc "The state of a breaker; see [States](#module-states)."
+  @type status :: :closed | :open | :half_open | :probing
+
   @doc """
   Starts the breaker manager and registers the declared breakers.
 
@@ -81,6 +84,7 @@ defmodule Rexsilient.CircuitBreaker do
       Required. Raises `ArgumentError` if two breakers share a name.
 
   """
+  @spec start_link(opts :: [modules: [module()]]) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -98,8 +102,10 @@ defmodule Rexsilient.CircuitBreaker do
       #=> :closed
 
   """
+  @spec status(name :: atom()) :: status()
   def status(name) do
     ref = :persistent_term.get({__MODULE__, name})
+
     case unpack(:atomics.get(ref, @state)) do
       {_, @closed} -> :closed
       {_, @open} -> :open
@@ -108,15 +114,78 @@ defmodule Rexsilient.CircuitBreaker do
     end
   end
 
-  @doc false
+  @doc """
+  Records the result of a call allowed by `acquire/1`.
+
+  `result` is `:success` or `:failure`, as decided by the caller, and
+  `state_counter` is the value returned by `acquire/1`; pass it unchanged.
+  Results recorded with a counter from a previous state are ignored, so a slow
+  call cannot affect a breaker that has since changed state.
+
+  Call it exactly once for every successful `acquire/1`, including when the
+  call raises. If the call was a probe and is never released, the breaker
+  stays in `:probing` and keeps rejecting calls. See `acquire/1` for an
+  example.
+
+  The result is recorded asynchronously, so `status/1` may not reflect it
+  right away.
+  """
+  @spec release(
+          name :: atom(),
+          result :: :success | :failure,
+          state_counter :: non_neg_integer()
+        ) :: :ok
   def release(name, result, state_counter) do
     GenServer.cast(__MODULE__, {:release, name, result, state_counter})
   end
 
-  @doc false
+  @doc """
+  Asks the breaker `name` whether a call may go through.
+
+  Returns `{:ok, state_counter}` if the call is allowed, or
+  `{:error, :circuit_open}` if it is rejected. When the breaker is half-open,
+  the caller that gets `{:ok, _}` becomes the probe.
+
+  Together with `release/3`, it is the building block of `run/3`. Use them
+  directly when `run/3` does not fit, for example when what counts as a
+  failure is not an `{:error, _}` return. After an allowed call, pass its
+  result and `state_counter` to `release/3`.
+
+  Raises `ArgumentError` if no breaker is registered under `name`.
+
+  ## Examples
+
+  Counting only server errors as failures:
+
+      case Rexsilient.CircuitBreaker.acquire(:payments) do
+        {:ok, state_counter} ->
+          try do
+            PaymentsClient.charge(order)
+          catch
+            kind, reason ->
+              Rexsilient.CircuitBreaker.release(:payments, :failure, state_counter)
+              :erlang.raise(kind, reason, __STACKTRACE__)
+          else
+            %{status: status} = response when status >= 500 ->
+              Rexsilient.CircuitBreaker.release(:payments, :failure, state_counter)
+              response
+
+            response ->
+              Rexsilient.CircuitBreaker.release(:payments, :success, state_counter)
+              response
+          end
+
+        {:error, :circuit_open} ->
+          {:error, :payments_unavailable}
+      end
+
+  """
+  @spec acquire(name :: atom()) :: {:ok, non_neg_integer()} | {:error, :circuit_open}
   def acquire(name) do
     case :persistent_term.get({__MODULE__, name}, nil) do
-      nil -> raise ArgumentError, "Unknow circuit breaker #{inspect(name)}"
+      nil ->
+        raise ArgumentError, "Unknow circuit breaker #{inspect(name)}"
+
       ref when is_reference(ref) ->
         state_value = :atomics.get(ref, @state)
         {state_counter, status} = unpack(state_value)
@@ -126,10 +195,16 @@ defmodule Rexsilient.CircuitBreaker do
             {:ok, state_counter &&& @state_mask}
 
           @half_open ->
-            case :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @probing)) do
-              :ok -> {:ok, (state_counter + 1) &&& @state_mask}
+            case :atomics.compare_exchange(
+                   ref,
+                   @state,
+                   state_value,
+                   pack(state_counter + 1, @probing)
+                 ) do
+              :ok -> {:ok, state_counter + 1 &&& @state_mask}
               _ -> {:error, :circuit_open}
             end
+
           _ ->
             {:error, :circuit_open}
         end
@@ -171,6 +246,11 @@ defmodule Rexsilient.CircuitBreaker do
       )
 
   """
+  @spec run(
+          name :: atom(),
+          func :: (-> term()),
+          opts :: [on_open: term(), fallback: (-> term())]
+        ) :: term()
   def run(name, func, opts \\ []) do
     case acquire(name) do
       {:ok, state_counter} ->
@@ -185,6 +265,7 @@ defmodule Rexsilient.CircuitBreaker do
             release(name, func_result(result), state_counter)
             result
         end
+
       {:error, :circuit_open} ->
         rejected(opts)
     end
@@ -232,7 +313,9 @@ defmodule Rexsilient.CircuitBreaker do
         {state_counter, _status} = unpack(:atomics.get(ref, @state))
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @open))
         {:reply, :ok, state}
-      :error -> {:reply, {:error, :unknown_breaker}, state}
+
+      :error ->
+        {:reply, {:error, :unknown_breaker}, state}
     end
   end
 
@@ -244,14 +327,22 @@ defmodule Rexsilient.CircuitBreaker do
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @closed))
         :ok = :atomics.put(ref, @failures, 0)
         {:reply, :ok, state}
-      :error -> {:reply, {:error, :unknown_breaker}, state}
+
+      :error ->
+        {:reply, {:error, :unknown_breaker}, state}
     end
   end
 
   @impl true
   def handle_info({:half_open, name, state_counter}, state) do
     %{ref: ref} = Map.fetch!(state, name)
-    :atomics.compare_exchange(ref, @state, pack(state_counter, @open), pack(state_counter + 1, @half_open))
+
+    :atomics.compare_exchange(
+      ref,
+      @state,
+      pack(state_counter, @open),
+      pack(state_counter + 1, @half_open)
+    )
 
     {:noreply, state}
   end
@@ -263,17 +354,23 @@ defmodule Rexsilient.CircuitBreaker do
 
     case {unpack(state_value), result} do
       {{^state_counter, @probing}, :success} ->
-        if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) == :ok,
-          do: :atomics.put(ref, @failures, 0)
+        if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) ==
+             :ok,
+           do: :atomics.put(ref, @failures, 0)
+
       {{^state_counter, @probing}, :failure} ->
-        if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) == :ok,
-          do: Process.send_after(self(), {:half_open, name, state_counter + 1}, config[:timeout])
+        if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) ==
+             :ok,
+           do: Process.send_after(self(), {:half_open, name, state_counter + 1}, config[:timeout])
+
       {{^state_counter, @closed}, :failure} ->
         if :atomics.add_get(ref, @failures, 1) >= config[:threshold] and
-             :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) == :ok,
-          do:
-          Process.send_after(self(), {:half_open, name, state_counter + 1}, config[:timeout])
-      _ -> :ok
+             :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) ==
+               :ok,
+           do: Process.send_after(self(), {:half_open, name, state_counter + 1}, config[:timeout])
+
+      _ ->
+        :ok
     end
 
     {:noreply, state}
