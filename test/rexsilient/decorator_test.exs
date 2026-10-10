@@ -1,9 +1,10 @@
 defmodule Rexsilient.DecoratorTest.Breakers do
   use Rexsilient
+  alias Rexsilient.CircuitBreaker
 
   circuit_breaker :decorated do
-    timeout(50)
-    threshold(2)
+    strategy(CircuitBreaker.Strategy.Count, threshold: 2)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
   end
 end
 

@@ -3,6 +3,9 @@ defmodule Rexsilient.DSLTest do
 
   import ExUnit.CaptureIO, only: [with_io: 2]
 
+  alias Rexsilient.CircuitBreaker.Recover.BasicTimeout
+  alias Rexsilient.CircuitBreaker.Strategy.Count
+
   # Every module is compiled inside its test, so a broken macro fails that test
   # instead of the whole file. Unique names keep async runs from colliding.
   defp compile!(body) do
@@ -33,14 +36,18 @@ defmodule Rexsilient.DSLTest do
         compile!(
           quote do
             circuit_breaker :payments do
-              timeout(5_000)
-              threshold(3)
+              strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 3)
+              recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 5_000)
             end
           end
         )
 
       assert mod.__rexsilient__(:circuit_breakers) == [
-               [threshold: 3, timeout: 5_000, name: :payments]
+               [
+                 recover: {BasicTimeout, [reset_timeout: 5_000]},
+                 strategy: {Count, [threshold: 3]},
+                 name: :payments
+               ]
              ]
     end
 
@@ -49,37 +56,48 @@ defmodule Rexsilient.DSLTest do
         compile!(
           quote do
             circuit_breaker :payments do
-              timeout(5_000)
-              threshold(3)
+              strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 3)
+              recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 5_000)
             end
 
             circuit_breaker :search do
-              threshold(10)
-              timeout(1_000)
+              recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 1_000)
+              strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 10)
             end
           end
         )
 
       assert mod.__rexsilient__(:circuit_breakers) == [
-               [threshold: 3, timeout: 5_000, name: :payments],
-               [timeout: 1_000, threshold: 10, name: :search]
+               [
+                 recover: {BasicTimeout, [reset_timeout: 5_000]},
+                 strategy: {Count, [threshold: 3]},
+                 name: :payments
+               ],
+               [
+                 strategy: {Count, [threshold: 10]},
+                 recover: {BasicTimeout, [reset_timeout: 1_000]},
+                 name: :search
+               ]
              ]
     end
 
-    test "evaluates values at compile time" do
+    test "evaluates modules and options at compile time" do
       mod =
         compile!(
           quote do
+            alias Rexsilient.CircuitBreaker.Recover.BasicTimeout
+            alias Rexsilient.CircuitBreaker.Strategy.Count
+
             circuit_breaker :payments do
-              timeout(:timer.seconds(5))
-              threshold(2 + 1)
+              strategy(Count, threshold: 2 + 1)
+              recover(BasicTimeout, reset_timeout: :timer.seconds(5))
             end
           end
         )
 
       assert [config] = mod.__rexsilient__(:circuit_breakers)
-      assert config[:timeout] == 5_000
-      assert config[:threshold] == 3
+      assert config[:strategy] == {Count, [threshold: 3]}
+      assert config[:recover] == {BasicTimeout, [reset_timeout: 5_000]}
     end
 
     test "a module without breakers declares an empty list and warns" do
@@ -95,8 +113,8 @@ defmodule Rexsilient.DSLTest do
       assert_dsl_error(
         quote do
           circuit_breaker "payments" do
-            timeout(1)
-            threshold(1)
+            strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 1)
+            recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 1)
           end
         end,
         ~r/"payments"/
@@ -105,65 +123,45 @@ defmodule Rexsilient.DSLTest do
   end
 
   describe "missing settings" do
-    test "rejects a breaker without timeout" do
+    test "rejects a breaker without strategy" do
       assert_dsl_error(
         quote do
           circuit_breaker :payments do
-            threshold(1)
+            recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 1)
           end
         end,
-        ~r/Missing timeout/
+        ~r/Missing strategy/
       )
     end
 
-    test "rejects a breaker without threshold" do
+    test "rejects a breaker without recover" do
       assert_dsl_error(
         quote do
           circuit_breaker :payments do
-            timeout(1)
+            strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 1)
           end
         end,
-        ~r/Missing threshold/
+        ~r/Missing recover/
       )
-    end
-  end
-
-  describe "invalid values" do
-    for {key, bad} <- [timeout: 0, timeout: -1, timeout: "1", threshold: 0, threshold: 1.5] do
-      test "rejects #{key} #{inspect(bad)}" do
-        key = unquote(key)
-        bad = unquote(bad)
-
-        assert_dsl_error(
-          quote do
-            circuit_breaker :payments do
-              timeout(1)
-              threshold(1)
-              unquote(key)(unquote(bad))
-            end
-          end,
-          ~r/#{key}\/1 must be a positive integer/
-        )
-      end
     end
   end
 
   describe "settings outside a breaker" do
-    test "rejects timeout outside circuit_breaker" do
+    test "rejects strategy outside circuit_breaker" do
       assert_dsl_error(
         quote do
-          timeout(5)
+          strategy(Rexsilient.CircuitBreaker.Strategy.Count, threshold: 1)
         end,
-        ~r/timeout\/1 outside/
+        ~r/strategy\/2 outside/
       )
     end
 
-    test "rejects threshold outside circuit_breaker" do
+    test "rejects recover outside circuit_breaker" do
       assert_dsl_error(
         quote do
-          threshold(5)
+          recover(Rexsilient.CircuitBreaker.Recover.BasicTimeout, reset_timeout: 1)
         end,
-        ~r/threshold\/1 outside/
+        ~r/recover\/2 outside/
       )
     end
   end

@@ -14,19 +14,27 @@ defmodule Rexsilient do
       defmodule MyApp.Breakers do
         use Rexsilient
 
+        alias Rexsilient.CircuitBreaker.{Recover, Strategy}
+
         circuit_breaker :payments do
-          threshold 5
-          timeout :timer.seconds(30)
+          strategy Strategy.Count, threshold: 5
+          recover Recover.BasicTimeout,
+            reset_timeout: :timer.seconds(30),
+            probing_timeout: :timer.seconds(10)
         end
 
         circuit_breaker :search do
-          threshold 10
-          timeout :timer.seconds(5)
+          strategy Strategy.Count, threshold: 10
+          recover Recover.BasicTimeout,
+            reset_timeout: :timer.seconds(5),
+            probing_timeout: :timer.seconds(2)
         end
       end
 
-  Declarations are validated at compile time. A missing or invalid setting
-  fails compilation with an error that points at the offending line.
+  Declarations are checked at compile time: a missing setting, or a setting
+  used outside `circuit_breaker/2`, fails compilation with an error that points
+  at the offending line. The options of each setting are checked when the
+  breaker is registered.
 
   The module is then passed to `Rexsilient.CircuitBreaker` in your supervision
   tree, which registers its breakers when it starts:
@@ -41,22 +49,35 @@ defmodule Rexsilient do
 
   ## Settings
 
-    * `threshold` - the number of failures that opens the breaker. Failures
-      are counted from the moment the breaker was last closed. Required.
+    * `strategy` - the module that decides when the breaker opens, and its
+      options. Required. See `strategy/2`.
 
-    * `timeout` - how long, in milliseconds, the breaker stays open before it
-      lets a probe call through. Required.
+    * `recover` - the module that decides how long the breaker stays open
+      before it lets a probe call through, and how long a probe may run before
+      another one is let through, and its options. Required. See `recover/2`.
 
-  Both must be positive integers. Values are evaluated at compile time, so
+  Modules and options are evaluated at compile time, so aliases and
   expressions such as `:timer.seconds(30)` are allowed.
   """
+
+  @macros [
+    :strategy,
+    :recover
+  ]
 
   @doc false
   defmacro __using__(_opts) do
     quote do
-      import Rexsilient, only: [circuit_breaker: 2, timeout: 1, threshold: 1]
+      import Rexsilient, only: [circuit_breaker: 2, strategy: 2, recover: 2]
       Module.register_attribute(__MODULE__, :circuit_breakers, accumulate: true)
       @before_compile Rexsilient
+      @behaviour Rexsilient.Failure
+
+      def failure?(:error), do: :failure
+      def failure?({:error, _}), do: :failure
+      def failure?(_), do: :success
+
+      defoverridable Rexsilient.Failure
     end
   end
 
@@ -69,14 +90,16 @@ defmodule Rexsilient do
   ## Examples
 
       circuit_breaker :payments do
-        threshold 5
-        timeout :timer.seconds(30)
+        strategy Rexsilient.CircuitBreaker.Strategy.Count, threshold: 5
+        recover Rexsilient.CircuitBreaker.Recover.BasicTimeout,
+          reset_timeout: :timer.seconds(30),
+          probing_timeout: :timer.seconds(10)
       end
 
   """
   defmacro circuit_breaker(name, do: block) do
     if !is_atom(name) do
-      compile_error!(location(__CALLER__), "Name #{inspect(name)} is not valid a atom")
+      compile_error!(location(__CALLER__), "Name #{inspect(name)} is not a valid atom")
     end
 
     quote do
@@ -87,44 +110,46 @@ defmodule Rexsilient do
   end
 
   @doc """
-  Sets how long, in milliseconds, the breaker stays open before it lets a
-  probe call through.
+  Sets the strategy that decides when the breaker opens.
 
-  Must be a positive integer and can only be used inside `circuit_breaker/2`.
+  `opts` are passed to `module` and only read by it. Can only be used inside
+  `circuit_breaker/2`.
 
   ## Examples
 
-      timeout 5_000
-      timeout :timer.seconds(5)
+      strategy Rexsilient.CircuitBreaker.Strategy.Count, threshold: 5
 
   """
-  defmacro timeout(value) do
+  defmacro strategy(module, opts) do
     quote do:
             Rexsilient.__create__(
               __MODULE__,
-              :timeout,
-              unquote(value),
+              :strategy,
+              unquote({module, opts}),
               unquote(location(__CALLER__))
             )
   end
 
   @doc """
-  Sets the number of failures that opens the breaker.
+  Sets how long the breaker stays open before it lets a probe call through,
+  and how long a probe may run before the breaker lets another one through.
 
-  Failures are counted from the moment the breaker was last closed. Must be a
-  positive integer and can only be used inside `circuit_breaker/2`.
+  `opts` are passed to `module` and only read by it. Can only be used inside
+  `circuit_breaker/2`.
 
   ## Examples
 
-      threshold 5
+      recover Rexsilient.CircuitBreaker.Recover.BasicTimeout,
+        reset_timeout: :timer.seconds(30),
+        probing_timeout: :timer.seconds(10)
 
   """
-  defmacro threshold(value) do
+  defmacro recover(module, opts) do
     quote do:
             Rexsilient.__create__(
               __MODULE__,
-              :threshold,
-              unquote(value),
+              :recover,
+              unquote({module, opts}),
               unquote(location(__CALLER__))
             )
   end
@@ -149,10 +174,7 @@ defmodule Rexsilient do
   def __create__(mod, key, value, location) do
     current_cb =
       Module.get_attribute(mod, :current_cb) ||
-        compile_error!(location, "#{key}/1 outside the circuit_breaker")
-
-    if not is_integer(value) or value <= 0,
-      do: compile_error!(location, "#{key}/1 must be a positive integer")
+        compile_error!(location, "#{key}/2 outside the circuit_breaker")
 
     Module.put_attribute(mod, :current_cb, Keyword.put(current_cb, key, value))
   end
@@ -161,7 +183,7 @@ defmodule Rexsilient do
   def __save__(mod, location) do
     current_cb = Module.get_attribute(mod, :current_cb)
 
-    for key <- [:timeout, :threshold],
+    for key <- @macros,
         not Keyword.has_key?(current_cb, key),
         do: compile_error!(location, "Missing #{key}")
 

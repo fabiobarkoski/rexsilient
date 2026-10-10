@@ -27,14 +27,20 @@ Breakers are declared in a module that uses `Rexsilient`:
 defmodule MyApp.Breakers do
   use Rexsilient
 
+  alias Rexsilient.CircuitBreaker.{Recover, Strategy}
+
   circuit_breaker :payments do
-    threshold 5
-    timeout :timer.seconds(30)
+    strategy Strategy.Count, threshold: 5
+    recover Recover.BasicTimeout,
+      reset_timeout: :timer.seconds(30),
+      probing_timeout: :timer.seconds(10)
   end
 
   circuit_breaker :search do
-    threshold 10
-    timeout :timer.seconds(5)
+    strategy Strategy.Count, threshold: 10
+    recover Recover.BasicTimeout,
+      reset_timeout: :timer.seconds(5),
+      probing_timeout: :timer.seconds(2)
   end
 end
 ```
@@ -65,11 +71,21 @@ end
 
 ### Circuit breaker
 
-A circuit breaker watches the calls made to a dependency. After `threshold`
-failures, it *opens*: calls are rejected immediately, without reaching the
-dependency. After `timeout` milliseconds, it lets a single call through as a
-*probe*. If the probe succeeds, the breaker closes and traffic resumes. If it
-fails, the breaker opens again for another `timeout`.
+A circuit breaker watches the calls made to a dependency. When its `strategy`
+decides there were too many failures, it *opens*: calls are rejected
+immediately, without reaching the dependency. After the wait set by its
+`recover` module, it lets a single call through as a *probe*. If the probe
+succeeds, the breaker closes and traffic resumes. If it fails, the breaker
+opens again. If it takes too long, also set by the `recover` module, another
+call is let through as the probe and the slow one's result is ignored.
+
+Built-in strategies and recovery modules:
+
+| Setting | Module | Behaviour |
+|:--------|:-------|:----------|
+| `strategy` | `Strategy.Count` | Opens after `threshold` failures since the breaker last closed |
+| `strategy` | `Strategy.SlidingWindow` | Opens after `threshold` failures within `window` milliseconds |
+| `recover` | `Recover.BasicTimeout` | Stays open for `reset_timeout` milliseconds; gives a probe `probing_timeout` milliseconds |
 
 `run/3` returns the function's result unchanged. When the breaker is open, it
 returns `{:error, :circuit_open}` and the function is not called. The rejection

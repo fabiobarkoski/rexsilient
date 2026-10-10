@@ -1,9 +1,69 @@
 defmodule Rexsilient.CircuitBreakerTest.Breakers do
   use Rexsilient
+  alias Rexsilient.CircuitBreaker
 
   circuit_breaker :cb_test do
-    timeout(50)
-    threshold(3)
+    strategy(CircuitBreaker.Strategy.Count, threshold: 3)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+end
+
+defmodule Rexsilient.CircuitBreakerTest.CustomFailureBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_custom_failure do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 3)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+
+  def failure?(:boom), do: :failure
+  def failure?(_), do: :success
+end
+
+# Redeclares :cb_test with other settings, to restart the manager with them.
+defmodule Rexsilient.CircuitBreakerTest.ReconfiguredBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_test do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 5)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+
+  def failure?(:boom), do: :failure
+  def failure?(_), do: :success
+end
+
+defmodule Rexsilient.CircuitBreakerTest.SlidingWindowBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_test do
+    strategy(CircuitBreaker.Strategy.SlidingWindow, threshold: 2, window: 1_000)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+end
+
+# Redeclares :cb_test with a short probing timeout. Threshold 1, so a single
+# failure that is not ignored would open the breaker.
+defmodule Rexsilient.CircuitBreakerTest.ShortProbingBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_test do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 1)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 150)
+  end
+end
+
+defmodule Rexsilient.CircuitBreakerTest.InvalidOptionsBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_invalid do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 0)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 50)
   end
 end
 
@@ -16,6 +76,14 @@ defmodule Rexsilient.CircuitBreakerTest do
 
   alias Rexsilient.CircuitBreaker, as: CB
 
+  alias Rexsilient.CircuitBreakerTest.{
+    Breakers,
+    CustomFailureBreakers,
+    ReconfiguredBreakers,
+    ShortProbingBreakers,
+    SlidingWindowBreakers
+  }
+
   @name :cb_test
   @timeout 50
   @threshold 3
@@ -23,8 +91,13 @@ defmodule Rexsilient.CircuitBreakerTest do
   # Every start reinstalls the breaker, and install resets an existing one to
   # closed, so each test starts from a fresh closed breaker.
   setup do
-    start_supervised!({CB, modules: [Rexsilient.CircuitBreakerTest.Breakers]})
+    start_supervised!({CB, modules: [Breakers, CustomFailureBreakers]})
     :ok
+  end
+
+  defp restart(modules) do
+    :ok = stop_supervised(CB)
+    start_supervised!({CB, modules: modules})
   end
 
   # Releases are casts; a call from this process is handled after them.
@@ -49,7 +122,7 @@ defmodule Rexsilient.CircuitBreakerTest do
   # The state counter, read from the packed state word (slot 1, above the 2
   # status bits). Only the wraparound tests need it.
   defp counter do
-    ref = :persistent_term.get({CB, @name})
+    %{ref: ref} = :persistent_term.get({CB, @name})
     :atomics.get(ref, 1) >>> 2
   end
 
@@ -96,7 +169,32 @@ defmodule Rexsilient.CircuitBreakerTest do
     end
 
     test "an unknown breaker raises" do
-      assert_raise ArgumentError, ~r/:nope/, fn -> CB.run(:nope, fn -> :ok end) end
+      for fun <- [
+            fn -> CB.run(:nope, fn -> :ok end) end,
+            fn -> CB.acquire(:nope) end,
+            fn -> CB.release(:nope, :success, 0) end,
+            fn -> CB.status(:nope) end
+          ] do
+        assert_raise ArgumentError, "unknown circuit breaker :nope", fun
+      end
+    end
+  end
+
+  describe "registration" do
+    # Calls init/1 directly: under start_supervised the error would be wrapped
+    # in the start failure.
+    test "invalid options name the breaker and the module" do
+      assert_raise ArgumentError,
+                   "circuit breaker :cb_invalid: invalid strategy options for " <>
+                     "Rexsilient.CircuitBreaker.Strategy.Count: " <>
+                     "threshold must be a positive integer, got: 0",
+                   fn -> CB.init(modules: [Rexsilient.CircuitBreakerTest.InvalidOptionsBreakers]) end
+    end
+
+    test "a duplicated name raises" do
+      assert_raise ArgumentError, "circuit breaker :cb_test already exists", fn ->
+        CB.init(modules: [Breakers, ReconfiguredBreakers])
+      end
     end
   end
 
@@ -122,6 +220,28 @@ defmodule Rexsilient.CircuitBreakerTest do
       CB.run(@name, fn -> :error end)
       sync()
       assert CB.status(@name) == :open
+    end
+
+    test "an overridden failure?/1 decides what counts as a failure" do
+      for value <- [:error, {:error, :a}, {:error, :b}, :ok] do
+        CB.run(:cb_custom_failure, fn -> value end)
+      end
+
+      sync()
+      assert CB.status(:cb_custom_failure) == :closed
+
+      for _ <- 1..@threshold, do: CB.run(:cb_custom_failure, fn -> :boom end)
+      sync()
+      assert CB.status(:cb_custom_failure) == :open
+    end
+
+    test "raise, throw and exit count as failures even with an overridden failure?/1" do
+      for _ <- 1..@threshold do
+        assert_raise RuntimeError, fn -> CB.run(:cb_custom_failure, fn -> raise "boom" end) end
+      end
+
+      sync()
+      assert CB.status(:cb_custom_failure) == :open
     end
 
     test "raise, throw and exit are re-raised unchanged and count as failures" do
@@ -192,6 +312,77 @@ defmodule Rexsilient.CircuitBreakerTest do
     end
   end
 
+  describe "probing timeout" do
+    @probing_timeout 150
+
+    setup do
+      restart([ShortProbingBreakers])
+      :ok
+    end
+
+    test "a probe running past probing_timeout makes the breaker half-open again" do
+      trip!()
+      wait_for(:half_open)
+      {task, runner} = start_blocking_call(:ok)
+
+      # Still probing after reset_timeout: the probing timer uses probing_timeout.
+      Process.sleep(@timeout * 2)
+      assert CB.status(@name) == :probing
+
+      wait_for(:half_open)
+      assert CB.run(@name, fn -> :ok end) == :ok
+      sync()
+      assert CB.status(@name) == :closed
+
+      send(runner, :go)
+      assert Task.await(task) == :ok
+    end
+
+    test "a late failure from a timed-out probe is ignored" do
+      trip!()
+      wait_for(:half_open)
+      {task, runner} = start_blocking_call({:error, :late})
+
+      wait_for(:half_open)
+      assert CB.run(@name, fn -> :ok end) == :ok
+      sync()
+
+      send(runner, :go)
+      assert Task.await(task) == {:error, :late}
+      sync()
+      assert CB.status(@name) == :closed
+    end
+
+    test "a late success from a timed-out probe does not close a re-opened breaker" do
+      trip!()
+      wait_for(:half_open)
+      {task, runner} = start_blocking_call(:ok)
+
+      wait_for(:half_open)
+      CB.run(@name, fn -> {:error, :still_down} end)
+      sync()
+      assert CB.status(@name) == :open
+
+      send(runner, :go)
+      assert Task.await(task) == :ok
+      sync()
+      # May already be half-open again after reset_timeout; it must not be closed.
+      refute CB.status(@name) == :closed
+    end
+
+    test "a probe that finishes in time leaves its timer with nothing to do" do
+      trip!()
+      wait_for(:half_open)
+
+      assert CB.run(@name, fn -> :ok end) == :ok
+      sync()
+      assert CB.status(@name) == :closed
+
+      Process.sleep(@probing_timeout * 2)
+      assert CB.status(@name) == :closed
+    end
+  end
+
   describe "stale releases and timers" do
     test "a success from before the trip does not close a probing breaker" do
       {:ok, old_counter} = CB.acquire(@name)
@@ -258,6 +449,43 @@ defmodule Rexsilient.CircuitBreakerTest do
       wait_until(fn -> Process.whereis(CB) not in [nil, pid] end)
       assert CB.status(@name) == :closed
     end
+
+    test "new strategy options are used after a restart" do
+      restart([ReconfiguredBreakers])
+
+      for _ <- 1..@threshold, do: CB.run(@name, fn -> :boom end)
+      sync()
+      assert CB.status(@name) == :closed
+
+      for _ <- 1..2, do: CB.run(@name, fn -> :boom end)
+      sync()
+      assert CB.status(@name) == :open
+    end
+
+    test "the new module's failure?/1 is used after a restart" do
+      restart([ReconfiguredBreakers])
+
+      for _ <- 1..5, do: CB.run(@name, fn -> {:error, :boom} end)
+      sync()
+      assert CB.status(@name) == :closed
+    end
+
+    test "the strategy module can change across a restart" do
+      restart([SlidingWindowBreakers])
+
+      for _ <- 1..2, do: CB.run(@name, fn -> :error end)
+      sync()
+      assert CB.status(@name) == :open
+    end
+
+    test "releases acquired before a restart are ignored" do
+      {:ok, old_counter} = CB.acquire(@name)
+      restart([Breakers, CustomFailureBreakers])
+
+      for _ <- 1..@threshold, do: CB.release(@name, :failure, old_counter)
+      sync()
+      assert CB.status(@name) == :closed
+    end
   end
 
   describe "state counter wraparound" do
@@ -266,7 +494,7 @@ defmodule Rexsilient.CircuitBreakerTest do
     @max_counter (1 <<< 61) - 1
 
     test "the counter goes back to 0 after the largest value" do
-      ref = :persistent_term.get({CB, @name})
+      %{ref: ref} = :persistent_term.get({CB, @name})
       :ok = :atomics.put(ref, 1, @max_counter <<< 2)
       assert {:ok, @max_counter} = CB.acquire(@name)
 
@@ -276,7 +504,7 @@ defmodule Rexsilient.CircuitBreakerTest do
     end
 
     test "a trip at the largest counter wraps it to 0" do
-      ref = :persistent_term.get({CB, @name})
+      %{ref: ref} = :persistent_term.get({CB, @name})
       :ok = :atomics.put(ref, 1, @max_counter <<< 2)
 
       trip!()
@@ -284,7 +512,7 @@ defmodule Rexsilient.CircuitBreakerTest do
     end
 
     test "a full cycle across the wrap works, and stale releases are still ignored" do
-      ref = :persistent_term.get({CB, @name})
+      %{ref: ref} = :persistent_term.get({CB, @name})
       :ok = :atomics.put(ref, 1, @max_counter <<< 2)
 
       {:ok, old_counter} = CB.acquire(@name)
@@ -305,7 +533,7 @@ defmodule Rexsilient.CircuitBreakerTest do
     end
 
     test "a probe claimed at the largest counter can still close the breaker" do
-      ref = :persistent_term.get({CB, @name})
+      %{ref: ref} = :persistent_term.get({CB, @name})
       :ok = :atomics.put(ref, 1, @max_counter <<< 2 ||| 2)
       assert CB.status(@name) == :half_open
 
