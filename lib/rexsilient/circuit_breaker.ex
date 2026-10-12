@@ -39,11 +39,11 @@ defmodule Rexsilient.CircuitBreaker do
 
   ## Failures
 
-  A call counts as a failure when it raises, throws or exits, or when the
-  `failure?/1` function of the module that declares the breaker says so. By
-  default, that is when the function returns `:error` or `{:error, _}`; every
-  other return value counts as a success. See `Rexsilient.Failure` to change
-  it.
+  Whether a call counts as a failure is decided by the `classify/1` and
+  `classify/2` functions of the module that declares the breaker. By default,
+  a call fails when the function returns `:error` or `{:error, _}`, or when it
+  raises, throws or exits; every other return value counts as a success. See
+  `Rexsilient.Classify` to change it.
 
   ## Starting
 
@@ -142,7 +142,7 @@ defmodule Rexsilient.CircuitBreaker do
   """
   @spec release(
           name(),
-          Rexsilient.Failure.result(),
+          Rexsilient.Classify.result(),
           state_counter()
         ) :: :ok
   def release(name, result, state_counter) do
@@ -181,7 +181,7 @@ defmodule Rexsilient.CircuitBreaker do
 
   Together with `release/3`, it is the building block of `run/3`. Use them
   directly when `run/3` does not fit, for example when what counts as a
-  failure depends on the call site rather than on the breaker's `failure?/1`.
+  failure depends on the call site rather than on the breaker's `classify/1`.
   After an allowed call, pass its result and `state_counter` to `release/3`.
 
   Raises `ArgumentError` if no breaker is registered under `name`.
@@ -248,8 +248,8 @@ defmodule Rexsilient.CircuitBreaker do
 
   If the breaker allows the call, `func` is invoked and its result is returned
   unchanged. The result is then recorded as a success or a failure (see
-  [Failures](#module-failures)). If `func` raises, throws
-  or exits, the failure is recorded and the error is re-raised unchanged.
+  [Failures](#module-failures)). If `func` raises, throws or exits, the
+  outcome is recorded the same way and the error is re-raised unchanged.
 
   If the breaker rejects the call, `func` is not invoked and
   `{:error, :circuit_open}` is returned, unless one of the options below says
@@ -286,17 +286,17 @@ defmodule Rexsilient.CircuitBreaker do
   def run(name, func, opts \\ []) do
     case acquire(name) do
       {:ok, state_counter} ->
-        %{module: module} = fetch_config!(name)
+        %{classify: {classify_value, classify_exception}} = fetch_config!(name)
 
         try do
           func.()
         catch
           kind, reason ->
-            release(name, :failure, state_counter)
+            release(name, classify_exception.(kind, reason), state_counter)
             :erlang.raise(kind, reason, __STACKTRACE__)
         else
           result ->
-            release(name, module.failure?(result), state_counter)
+            release(name, classify_value.(result), state_counter)
             result
         end
 
@@ -404,10 +404,16 @@ defmodule Rexsilient.CircuitBreaker do
     {strategy, strategy_opts} = opts[:strategy]
     {recover, recover_opts} = opts[:recover]
 
+    classify = Keyword.get(opts, :classify_with, :classify)
+
     config = %{
       module: module,
       strategy: {strategy, init_setting!(name, :strategy, strategy, strategy_opts)},
-      recover: {recover, init_setting!(name, :recover, recover, recover_opts)}
+      recover: {recover, init_setting!(name, :recover, recover, recover_opts)},
+      classify: {
+        Rexsilient.Options.classifier(module, classify, 1),
+        Rexsilient.Options.classifier(module, classify, 2)
+      }
     }
 
     case :persistent_term.get(key, nil) do

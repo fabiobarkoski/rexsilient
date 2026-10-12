@@ -1,6 +1,10 @@
 defmodule Rexsilient.Options do
   @moduledoc false
 
+  def classifier(module, func, arity) do
+    Function.capture(module, func, arity)
+  end
+
   @type type :: :pos_integer | :non_neg_integer
 
   @doc """

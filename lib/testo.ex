@@ -5,9 +5,9 @@ defmodule Testo do
   circuit_breaker :test do
     strategy(CircuitBreaker.Strategy.SlidingWindow, threshold: 3, window: :timer.seconds(5))
     recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: :timer.seconds(5), probing_timeout: :timer.seconds(5))
+    classify_with(:outro)
   end
 
-  @impl true
-  def failure?(404), do: :failure
-  def failure?(result), do: super(result)
+  def outro(:boba), do: :failure
+  def outro(_), do: :success
 end

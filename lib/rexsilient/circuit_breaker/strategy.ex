@@ -38,7 +38,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy do
   """
   @callback record(
               state :: state(),
-              result :: Rexsilient.Failure.result(),
+              result :: Rexsilient.Classify.result(),
               duration :: non_neg_integer()
             ) :: :ok | :trip
 

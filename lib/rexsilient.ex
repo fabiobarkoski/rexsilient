@@ -60,24 +60,23 @@ defmodule Rexsilient do
   expressions such as `:timer.seconds(30)` are allowed.
   """
 
-  @macros [
-    :strategy,
-    :recover
-  ]
-
   @doc false
   defmacro __using__(_opts) do
     quote do
-      import Rexsilient, only: [circuit_breaker: 2, strategy: 2, recover: 2]
+      import Rexsilient, only: [
+        circuit_breaker: 2, strategy: 2, recover: 2, classify_with: 1
+      ]
       Module.register_attribute(__MODULE__, :circuit_breakers, accumulate: true)
       @before_compile Rexsilient
-      @behaviour Rexsilient.Failure
+      @behaviour Rexsilient.Classify
 
-      def failure?(:error), do: :failure
-      def failure?({:error, _}), do: :failure
-      def failure?(_), do: :success
+      def classify(:error), do: :failure
+      def classify({:error, _}), do: :failure
+      def classify(_), do: :success
 
-      defoverridable Rexsilient.Failure
+      def classify(_kind, _reason), do: :failure
+
+      defoverridable Rexsilient.Classify
     end
   end
 
@@ -105,7 +104,11 @@ defmodule Rexsilient do
     quote do
       @current_cb [name: unquote(name)]
       unquote(block)
-      Rexsilient.__save__(__MODULE__, unquote(location(__CALLER__)))
+      Rexsilient.__save__(
+        __MODULE__,
+        unquote(location(__CALLER__)),
+        [:strategy, :recover]
+      )
     end
   end
 
@@ -154,6 +157,16 @@ defmodule Rexsilient do
             )
   end
 
+  defmacro classify_with(func_name) do
+    quote do:
+        Rexsilient.__create__(
+          __MODULE__,
+          :classify_with,
+          unquote(func_name),
+          unquote(location(__CALLER__))
+        )
+  end
+
   @doc false
   defmacro __before_compile__(env) do
     circuits =
@@ -180,10 +193,10 @@ defmodule Rexsilient do
   end
 
   @doc false
-  def __save__(mod, location) do
+  def __save__(mod, location, required_values) do
     current_cb = Module.get_attribute(mod, :current_cb)
 
-    for key <- @macros,
+    for key <- required_values,
         not Keyword.has_key?(current_cb, key),
         do: compile_error!(location, "Missing #{key}")
 

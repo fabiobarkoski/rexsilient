@@ -17,8 +17,21 @@ defmodule Rexsilient.CircuitBreakerTest.CustomFailureBreakers do
     recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
   end
 
-  def failure?(:boom), do: :failure
-  def failure?(_), do: :success
+  def classify(:boom), do: :failure
+  def classify(_), do: :success
+end
+
+defmodule Rexsilient.CircuitBreakerTest.CustomExceptionBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_custom_exception do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 3)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+
+  def classify(:throw, :ignored), do: :success
+  def classify(kind, reason), do: super(kind, reason)
 end
 
 # Redeclares :cb_test with other settings, to restart the manager with them.
@@ -31,8 +44,8 @@ defmodule Rexsilient.CircuitBreakerTest.ReconfiguredBreakers do
     recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
   end
 
-  def failure?(:boom), do: :failure
-  def failure?(_), do: :success
+  def classify(:boom), do: :failure
+  def classify(_), do: :success
 end
 
 defmodule Rexsilient.CircuitBreakerTest.SlidingWindowBreakers do
@@ -78,6 +91,7 @@ defmodule Rexsilient.CircuitBreakerTest do
 
   alias Rexsilient.CircuitBreakerTest.{
     Breakers,
+    CustomExceptionBreakers,
     CustomFailureBreakers,
     ReconfiguredBreakers,
     ShortProbingBreakers,
@@ -91,7 +105,7 @@ defmodule Rexsilient.CircuitBreakerTest do
   # Every start reinstalls the breaker, and install resets an existing one to
   # closed, so each test starts from a fresh closed breaker.
   setup do
-    start_supervised!({CB, modules: [Breakers, CustomFailureBreakers]})
+    start_supervised!({CB, modules: [Breakers, CustomFailureBreakers, CustomExceptionBreakers]})
     :ok
   end
 
@@ -222,7 +236,7 @@ defmodule Rexsilient.CircuitBreakerTest do
       assert CB.status(@name) == :open
     end
 
-    test "an overridden failure?/1 decides what counts as a failure" do
+    test "an overridden classify/1 decides what counts as a failure" do
       for value <- [:error, {:error, :a}, {:error, :b}, :ok] do
         CB.run(:cb_custom_failure, fn -> value end)
       end
@@ -235,13 +249,29 @@ defmodule Rexsilient.CircuitBreakerTest do
       assert CB.status(:cb_custom_failure) == :open
     end
 
-    test "raise, throw and exit count as failures even with an overridden failure?/1" do
+    test "overriding classify/1 keeps the default classify/2" do
       for _ <- 1..@threshold do
         assert_raise RuntimeError, fn -> CB.run(:cb_custom_failure, fn -> raise "boom" end) end
       end
 
       sync()
       assert CB.status(:cb_custom_failure) == :open
+    end
+
+    test "an overridden classify/2 decides how exceptions count, and they are still re-raised" do
+      for _ <- 1..@threshold do
+        assert catch_throw(CB.run(:cb_custom_exception, fn -> throw(:ignored) end)) == :ignored
+      end
+
+      sync()
+      assert CB.status(:cb_custom_exception) == :closed
+
+      for _ <- 1..@threshold do
+        assert catch_throw(CB.run(:cb_custom_exception, fn -> throw(:other) end)) == :other
+      end
+
+      sync()
+      assert CB.status(:cb_custom_exception) == :open
     end
 
     test "raise, throw and exit are re-raised unchanged and count as failures" do
@@ -462,7 +492,7 @@ defmodule Rexsilient.CircuitBreakerTest do
       assert CB.status(@name) == :open
     end
 
-    test "the new module's failure?/1 is used after a restart" do
+    test "the new module's classify/1 is used after a restart" do
       restart([ReconfiguredBreakers])
 
       for _ <- 1..5, do: CB.run(@name, fn -> {:error, :boom} end)
