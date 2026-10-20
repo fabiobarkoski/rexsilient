@@ -80,6 +80,28 @@ defmodule Rexsilient.CircuitBreakerTest.InvalidOptionsBreakers do
   end
 end
 
+defmodule Rexsilient.CircuitBreakerTest.WrongStrategyBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  # A retry strategy: init/1 accepts the options, but record/3 and reset/1
+  # are missing.
+  circuit_breaker :cb_wrong_strategy do
+    strategy(Rexsilient.Retry.Strategy.Constant, delay: 0)
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 50)
+  end
+end
+
+defmodule Rexsilient.CircuitBreakerTest.UnavailableRecoverBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_unavailable_recover do
+    strategy(CircuitBreaker.Strategy.Count, threshold: 1)
+    recover(Rexsilient.CircuitBreakerTest.Nope, [])
+  end
+end
+
 defmodule Rexsilient.CircuitBreakerTest do
   # The manager is a named singleton and breakers live in :persistent_term, so
   # these tests cannot run concurrently with each other.
@@ -177,11 +199,6 @@ defmodule Rexsilient.CircuitBreakerTest do
                {:error, :unavailable}
     end
 
-    test "fallback: is called on rejection" do
-      trip!()
-      assert CB.run(@name, fn -> :ok end, fallback: fn -> :cached end) == :cached
-    end
-
     test "an unknown breaker raises" do
       for fun <- [
             fn -> CB.run(:nope, fn -> :ok end) end,
@@ -202,7 +219,34 @@ defmodule Rexsilient.CircuitBreakerTest do
                    "circuit breaker :cb_invalid: invalid strategy options for " <>
                      "Rexsilient.CircuitBreaker.Strategy.Count: " <>
                      "threshold must be a positive integer, got: 0",
-                   fn -> CB.init(modules: [Rexsilient.CircuitBreakerTest.InvalidOptionsBreakers]) end
+                   fn ->
+                     CB.init(modules: [Rexsilient.CircuitBreakerTest.InvalidOptionsBreakers])
+                   end
+    end
+
+    test "a module of another behaviour names the breaker and the missing callbacks" do
+      err =
+        assert_raise ArgumentError, fn ->
+          CB.init(modules: [Rexsilient.CircuitBreakerTest.WrongStrategyBreakers])
+        end
+
+      message = Exception.message(err)
+
+      assert message =~
+               "circuit breaker :cb_wrong_strategy: Rexsilient.Retry.Strategy.Constant " <>
+                 "does not implement Rexsilient.CircuitBreaker.Strategy"
+
+      assert message =~ "record/3"
+      assert message =~ "reset/1"
+    end
+
+    test "a module that is not available names the breaker" do
+      assert_raise ArgumentError,
+                   "circuit breaker :cb_unavailable_recover: " <>
+                     "module Rexsilient.CircuitBreakerTest.Nope is not available",
+                   fn ->
+                     CB.init(modules: [Rexsilient.CircuitBreakerTest.UnavailableRecoverBreakers])
+                   end
     end
 
     test "a duplicated name raises" do
@@ -428,7 +472,7 @@ defmodule Rexsilient.CircuitBreakerTest do
 
     test "failures from before a close do not count afterwards" do
       {:ok, old_counter} = CB.acquire(@name)
-      :ok = GenServer.call(CB, {:close, @name})
+      :ok = CB.force_close(@name)
 
       for _ <- 1..@threshold, do: CB.release(@name, :failure, old_counter)
       sync()
@@ -437,7 +481,7 @@ defmodule Rexsilient.CircuitBreakerTest do
 
     test "a half-open timer armed before a close is ignored" do
       trip!()
-      :ok = GenServer.call(CB, {:close, @name})
+      :ok = CB.force_close(@name)
 
       Process.sleep(@timeout * 2)
       assert CB.status(@name) == :closed
@@ -445,24 +489,30 @@ defmodule Rexsilient.CircuitBreakerTest do
   end
 
   describe "admin" do
-    test "open forces the breaker open with no timer" do
-      :ok = GenServer.call(CB, {:open, @name})
+    test "force_open/1 opens the breaker with no timer" do
+      :ok = CB.force_open(@name)
 
       Process.sleep(@timeout * 2)
       assert CB.status(@name) == :open
     end
 
-    test "close closes an open breaker" do
+    test "force_close/1 closes an open breaker" do
       trip!()
-      :ok = GenServer.call(CB, {:close, @name})
+      :ok = CB.force_close(@name)
       assert CB.status(@name) == :closed
     end
 
-    test "an unknown name returns an error and does not crash the manager" do
+    test "force_close/1 closes a breaker forced open" do
+      :ok = CB.force_open(@name)
+      :ok = CB.force_close(@name)
+      assert CB.status(@name) == :closed
+    end
+
+    test "an unknown name raises and does not crash the manager" do
       pid = Process.whereis(CB)
 
-      assert GenServer.call(CB, {:open, :nope}) == {:error, :unknown_breaker}
-      assert GenServer.call(CB, {:close, :nope}) == {:error, :unknown_breaker}
+      assert_raise ArgumentError, "unknown circuit breaker :nope", fn -> CB.force_open(:nope) end
+      assert_raise ArgumentError, "unknown circuit breaker :nope", fn -> CB.force_close(:nope) end
       assert Process.whereis(CB) == pid
     end
   end
@@ -528,7 +578,7 @@ defmodule Rexsilient.CircuitBreakerTest do
       :ok = :atomics.put(ref, 1, @max_counter <<< 2)
       assert {:ok, @max_counter} = CB.acquire(@name)
 
-      :ok = GenServer.call(CB, {:close, @name})
+      :ok = CB.force_close(@name)
       assert counter() == 0
       assert {:ok, 0} = CB.acquire(@name)
     end

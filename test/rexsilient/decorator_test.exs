@@ -26,11 +26,6 @@ defmodule Rexsilient.DecoratorTest.Client do
   @circuit_breaker name: :decorated, on_open: {:error, :unavailable}
   def with_on_open(result), do: result
 
-  @circuit_breaker name: :decorated, fallback: &__MODULE__.cached/0
-  def with_fallback(result), do: result
-
-  def cached, do: :cached
-
   @circuit_breaker :decorated
   def countdown(0), do: {:error, :done}
   def countdown(n), do: countdown(n - 1)
@@ -166,14 +161,8 @@ defmodule Rexsilient.DecoratorTest do
       assert Client.with_on_open(:ok) == {:error, :unavailable}
     end
 
-    test "fallback: is called on rejection" do
-      trip!()
-      assert Client.with_fallback(:ok) == :cached
-    end
-
     test "a keyword list with :name behaves like the plain name" do
-      assert Client.with_on_open({:error, :boom}) == {:error, :boom}
-      assert Client.with_fallback({:error, :boom}) == {:error, :boom}
+      for _ <- 1..2, do: assert(Client.with_on_open({:error, :boom}) == {:error, :boom})
       sync()
       assert CB.status(@name) == :open
     end

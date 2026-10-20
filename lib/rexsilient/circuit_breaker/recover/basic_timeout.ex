@@ -9,6 +9,7 @@ defmodule Rexsilient.CircuitBreaker.Recover.BasicTimeout do
 
     * `:probing_timeout` - how long, in milliseconds, a probe may run before
       the breaker becomes half-open again and lets another probe through.
+      Must be positive: with `0`, every probe would time out as it starts.
       Required.
 
   ## Examples
@@ -24,11 +25,14 @@ defmodule Rexsilient.CircuitBreaker.Recover.BasicTimeout do
   def init(opts) do
     Rexsilient.Options.validate!(opts,
       reset_timeout: :non_neg_integer,
-      probing_timeout: :non_neg_integer
+      probing_timeout: :pos_integer
     )
   end
 
   @impl true
-  def timeout({_from, :probing}, %{probing_timeout: timeout} = state), do: {timeout, state}
-  def timeout({_from, :open}, %{reset_timeout: timeout} = state), do: {timeout, state}
+  def timeout(%{transition: {_from, :probing}}, %{probing_timeout: timeout} = state),
+    do: {timeout, state}
+
+  def timeout(%{transition: {_from, :open}}, %{reset_timeout: timeout} = state),
+    do: {timeout, state}
 end

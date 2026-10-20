@@ -37,6 +37,14 @@ defmodule Rexsilient.Classify do
   @typedoc "Whether a call succeeded or failed."
   @type result :: :success | :failure
 
+  @typedoc """
+  What a call produced: `{:value, value}` for a value it returned, or
+  `{kind, reason}` for a raise, throw or exit, as given to `catch`.
+  """
+  @type outcome ::
+          {:value, value :: term()}
+          | {kind :: :error | :throw | :exit, reason :: term()}
+
   @doc """
   Classifies a value returned by the call.
   """
@@ -49,4 +57,16 @@ defmodule Rexsilient.Classify do
   `:error` and `reason` the exception.
   """
   @callback classify(kind :: :error | :throw | :exit, reason :: term()) :: result()
+
+  @doc false
+  def __resolve__(module, func_name) do
+    Code.ensure_loaded!(module)
+    {capture(module, func_name, 1), capture(module, func_name, 2)}
+  end
+
+  defp capture(module, func_name, arity) do
+    if function_exported?(module, func_name, arity),
+      do: Function.capture(module, func_name, arity),
+      else: Function.capture(module, :classify, arity)
+  end
 end

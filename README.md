@@ -92,14 +92,11 @@ returns `{:error, :circuit_open}` and the function is not called. The rejection
 value can be changed:
 
 ```elixir
-# a fixed value
 CircuitBreaker.run(:payments, fun, on_open: {:error, :unavailable})
-
-# a function, called only when the call is rejected
-CircuitBreaker.run(:prices, fn -> Prices.fetch(sku) end,
-  fallback: fn -> Cache.last_price(sku) end
-)
 ```
+
+To compute another result instead, such as a cached value, wrap the call in a
+fallback, which always replaces `{:error, :circuit_open}`.
 
 A call counts as a failure when the function returns `:error` or
 `{:error, _}`, or when it raises, throws or exits. Exceptions are re-raised
@@ -112,6 +109,130 @@ The breaker's state can be inspected with `status/1`:
 CircuitBreaker.status(:payments)
 #=> :closed | :open | :half_open | :probing
 ```
+
+### Combining patterns
+
+Fallback, retry and circuit breaker can protect the same call. Combined, they
+nest in a fixed order: the fallback outside, the retry in the middle and the
+breaker inside, next to the call.
+
+```
+fallback( retry( circuit_breaker( call ) ) )
+```
+
+- Every attempt goes through the breaker, so it counts each real failure.
+- The retry stops as soon as the breaker is open, instead of waiting on it.
+- The fallback sees the final outcome, the last failure or the breaker's
+  rejection, and replaces it.
+
+Each pattern keeps its own declaration and classifier. Patterns of different
+kinds can share a name. A `policy` groups them under one name, referencing
+each declaration by its name:
+
+```elixir
+defmodule MyApp.Resilience do
+  use Rexsilient
+
+  alias Rexsilient.CircuitBreaker.{Recover, Strategy}
+  alias Rexsilient.Retry
+
+  fallback :prices do
+    function :cached_price
+  end
+
+  retry :prices do
+    attempts 3
+    strategy Retry.Strategy.Exponential, base_delay: 100, max_delay: 2_000, jitter: :full
+  end
+
+  circuit_breaker :prices do
+    strategy Strategy.Count, threshold: 5
+    recover Recover.BasicTimeout,
+      reset_timeout: :timer.seconds(30),
+      probing_timeout: :timer.seconds(10)
+  end
+
+  policy :prices do
+    fallback :prices
+    retry :prices
+    circuit_breaker :prices
+  end
+
+  def cached_price(sku), do: Cache.last_price(sku)
+end
+```
+
+The policy is then used with `@policy` from `Rexsilient.Decorator`:
+
+```elixir
+defmodule MyApp.Prices do
+  use Rexsilient.Decorator
+
+  @policy :prices
+  def fetch(sku) do
+    PricesClient.fetch(sku)
+  end
+end
+```
+
+Any entry of a policy can be left out, for example a fallback around a
+breaker with no retry. Names that are not declared raise an error when
+`Rexsilient` starts.
+
+Without a policy, the same result comes from stacking the decorators, which
+nest in the same order whatever the order they are written in:
+
+```elixir
+@fallback :prices
+@retry :prices
+@circuit_breaker :prices
+def fetch(sku) do
+  PricesClient.fetch(sku)
+end
+```
+
+or from nesting the calls:
+
+```elixir
+alias Rexsilient.{CircuitBreaker, Fallback, Retry}
+
+Fallback.run(:prices, fn sku ->
+  Retry.run(:prices, fn ->
+    CircuitBreaker.run(:prices, fn -> Prices.fetch(sku) end)
+  end)
+end, sku)
+```
+
+#### Other orders
+
+The fixed order fits most cases. A few need another one, for example:
+
+- A breaker outside the retry, so that it counts a whole retry sequence as one
+  call and opens only on calls that still fail after every attempt.
+- The same pattern twice, such as a breaker per host inside a breaker for the
+  whole service.
+
+For these, nest the calls in the order you need:
+
+```elixir
+CircuitBreaker.run(:prices, fn ->
+  Retry.run(:prices, fn -> Prices.fetch(sku) end)
+end)
+```
+
+or, with decorators, decorate one function per layer, each calling the next:
+
+```elixir
+@circuit_breaker :prices
+def fetch(sku), do: fetch_with_retry(sku)
+
+@doc false
+@retry :prices
+def fetch_with_retry(sku), do: PricesClient.fetch(sku)
+```
+
+Decorated functions must be public, so calling the inner one directly skips
+the outer layer.
 
 ### Design
 
@@ -126,8 +247,8 @@ never blocks traffic.
 | Pattern | Purpose | Status |
 |:--------|:--------|:-------|
 | Circuit breaker | Stop calling a dependency that keeps failing | In development |
-| Fallback | Provide an alternative result when a call is rejected | Partial, through `fallback:` |
-| Retry | Retry transient failures, with backoff | Planned |
+| Fallback | Provide an alternative result when a call fails | In development |
+| Retry | Retry transient failures, with backoff | In development |
 | Timeout | Give up on calls that take too long | Planned |
 | Bulkhead | Limit concurrent calls to a dependency | Planned |
 | Rate limiter | Limit how often a dependency is called | Planned |

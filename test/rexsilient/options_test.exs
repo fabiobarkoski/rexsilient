@@ -1,7 +1,44 @@
+defmodule Rexsilient.OptionsTest.Behaviour do
+  @callback required(term()) :: term()
+  @callback other(term(), term()) :: term()
+  @callback optional() :: term()
+  @optional_callbacks optional: 0
+end
+
+defmodule Rexsilient.OptionsTest.Complete do
+  @behaviour Rexsilient.OptionsTest.Behaviour
+  def required(_), do: :ok
+  def other(_, _), do: :ok
+end
+
+defmodule Rexsilient.OptionsTest.Partial do
+  def required(_), do: :ok
+end
+
 defmodule Rexsilient.OptionsTest do
   use ExUnit.Case, async: true
 
   alias Rexsilient.Options
+  alias Rexsilient.OptionsTest.{Behaviour, Complete, Partial}
+
+  describe "implements!/3" do
+    test "accepts a module with every required callback, optional ones aside" do
+      assert Options.implements!(Complete, Behaviour, "owner") == :ok
+    end
+
+    test "names the owner and the missing callbacks" do
+      assert_raise ArgumentError,
+                   "owner: Rexsilient.OptionsTest.Partial does not implement " <>
+                     "Rexsilient.OptionsTest.Behaviour (missing other/2)",
+                   fn -> Options.implements!(Partial, Behaviour, "owner") end
+    end
+
+    test "rejects a module that is not available" do
+      assert_raise ArgumentError,
+                   "owner: module Rexsilient.OptionsTest.Nope is not available",
+                   fn -> Options.implements!(Rexsilient.OptionsTest.Nope, Behaviour, "owner") end
+    end
+  end
 
   @schema [count: :pos_integer, timeout: :non_neg_integer]
 

@@ -10,6 +10,13 @@ defmodule Rexsilient.CircuitBreaker.Strategy.SlidingWindow do
 
     * `:threshold` - the number of failures that opens the breaker. Required.
 
+      With `1`, the first failure opens the breaker and `:window` has no
+      effect, like `Rexsilient.CircuitBreaker.Strategy.Count` with the same
+      threshold.
+
+      The breaker keeps the time of the last `threshold - 1` failures, 8 bytes
+      each, so memory grows with the threshold.
+
     * `:window` - the time, in milliseconds, those failures must fit in.
       Required.
 
@@ -41,15 +48,18 @@ defmodule Rexsilient.CircuitBreaker.Strategy.SlidingWindow do
   @impl true
   def record(_state, :success, _duration), do: :ok
   def record(%{slots: 0}, :failure, _duration), do: :trip
+
   def record(state, :failure, _duration) do
     %{
       ref_window: ref_window,
       base_time: base_time,
       window: window
     } = state
+
     value = System.monotonic_time(:millisecond) - base_time + 1
     position = get_position(state)
     old_value = :atomics.exchange(ref_window, position, value)
+
     if value - old_value <= window and old_value != 0 do
       :trip
     else
@@ -59,6 +69,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy.SlidingWindow do
 
   @impl true
   def reset(%{slots: 0}), do: :ok
+
   def reset(state) do
     %{
       ref_window: ref,
@@ -69,6 +80,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy.SlidingWindow do
     for idx <- 1..slots do
       :ok = :atomics.put(ref, idx, 0)
     end
+
     :ok = :atomics.put(ref_counter, 1, 0)
   end
 

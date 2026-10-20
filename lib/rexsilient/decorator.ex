@@ -28,13 +28,68 @@ defmodule Rexsilient.Decorator do
   To pass options to `Rexsilient.CircuitBreaker.run/3`, give a keyword list
   with the breaker name under `:name`:
 
-      @circuit_breaker name: :prices, fallback: &Cache.last_price/0
+      @circuit_breaker name: :prices, on_open: {:error, :unavailable}
       def fetch_price(sku) do
         PricesClient.fetch(sku)
       end
 
-  Anonymous functions cannot be stored in module attributes, so pass
-  `:fallback` as a function capture.
+  ## Stacking
+
+  `@fallback`, `@retry` and `@circuit_breaker` can be used on the same
+  function. They always nest in the same order, whatever the order they are
+  written in:
+
+      @fallback :prices
+      @retry :prices
+      @circuit_breaker :prices
+      def fetch_price(sku) do
+        PricesClient.fetch(sku)
+      end
+
+  behaves like:
+
+      Rexsilient.Fallback.run(:prices, fn sku ->
+        Rexsilient.Retry.run(:prices, fn ->
+          Rexsilient.CircuitBreaker.run(:prices, fn -> PricesClient.fetch(sku) end)
+        end)
+      end, sku)
+
+  Every attempt goes through the breaker and is counted. The retry stops as
+  soon as the breaker is open, and the fallback replaces whatever outcome is
+  left: the last attempt's failure or the breaker's rejection.
+
+  When the same stack is used on several functions, declare it once as a
+  policy with `Rexsilient.policy/2` and use `@policy`:
+
+      # in the module that uses Rexsilient
+      policy :prices do
+        fallback :prices
+        retry :prices
+        circuit_breaker :prices
+      end
+
+      # in the decorated module
+      @policy :prices
+      def fetch_price(sku) do
+        PricesClient.fetch(sku)
+      end
+
+  A policy nests in the same order. `@policy` cannot be combined with the
+  other decorators on the same function.
+
+  For another order, or the same pattern twice, decorate one function per
+  layer, each calling the next:
+
+      # The breaker counts a whole retry sequence as one call.
+      @circuit_breaker :prices
+      def fetch_price(sku), do: fetch_price_with_retry(sku)
+
+      @doc false
+      @retry :prices
+      def fetch_price_with_retry(sku), do: PricesClient.fetch(sku)
+
+  The inner function must be public, so calling it directly skips the outer
+  layer.
 
   ## Rules
 
@@ -49,7 +104,12 @@ defmodule Rexsilient.Decorator do
 
   """
 
+  # Outermost first: stacked decorators nest in this order, whatever the
+  # order the attributes are written in. `@policy` is used alone.
   @decorators [
+    policy: {Rexsilient.Policy, :wrap_run},
+    fallback: {Rexsilient.Fallback, :wrap_run},
+    retry: {Rexsilient.Retry, :wrap_run},
     circuit_breaker: {Rexsilient.CircuitBreaker, :wrap_run}
   ]
 
@@ -86,6 +146,13 @@ defmodule Rexsilient.Decorator do
         compile_error!(
           env,
           "Decorators are only supported on def, got #{kind} #{name}"
+        )
+
+      Keyword.has_key?(pending, :policy) and length(pending) > 1 ->
+        compile_error!(
+          env,
+          "@policy on #{name} cannot be combined with other decorators; " <>
+            "add them to the policy instead"
         )
 
       true ->

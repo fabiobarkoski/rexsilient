@@ -2,8 +2,8 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   @moduledoc """
   Decides how long a breaker waits before it lets a probe call through.
 
-  `timeout/2` is called by the manager with the transition that starts a
-  timer:
+  `timeout/2` is called by the manager with a context whose `:transition` is
+  the change of state that starts a timer:
 
     * `{:closed, :open}` - the breaker tripped. Returns how long it stays open.
 
@@ -26,9 +26,16 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   example, a `{:half_open, :probing}` right after another one means the
   previous probe timed out.
 
+  > #### `timeout/2` runs in the manager {: .warning}
+  >
+  > One manager process serves every breaker, and `timeout/2` runs inside
+  > it. A slow `timeout/2` delays the timers of all breakers, and one that
+  > raises crashes the manager: when it restarts, every breaker restarts
+  > closed. Take care with what it does.
+
   Built-in: `Rexsilient.CircuitBreaker.Recover.BasicTimeout`.
   """
-  alias Rexsilient.CircuitBreaker
+  alias Rexsilient.{CircuitBreaker, Classify}
 
   @typedoc "The value returned by `init/1`, then by each `timeout/2`."
   @type state :: term()
@@ -38,6 +45,24 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   documentation for the ones passed.
   """
   @type transition :: {CircuitBreaker.status(), CircuitBreaker.status()}
+
+  @typedoc """
+  What `timeout/2` knows about the change of state:
+
+    * `:transition` - the change of state that starts the timer.
+
+    * `:outcome` - the failure that opened the breaker, for `{:closed, :open}`
+      and `{:probing, :open}`. When a strategy opens the breaker after several
+      failures, it is the last one. `nil` for `{:half_open, :probing}`, and
+      when the failure was recorded with
+      `Rexsilient.CircuitBreaker.release/4` without an outcome.
+
+  More keys may be added, so match only on the ones needed.
+  """
+  @type context :: %{
+          transition: transition(),
+          outcome: Classify.outcome() | nil
+        }
 
   @doc """
   Validates `opts` and returns the initial state.
@@ -49,9 +74,9 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   @callback init(opts :: keyword()) :: state()
 
   @doc """
-  Returns how long, in milliseconds, to wait after `transition`, and the new
-  state.
+  Returns how long, in milliseconds, to wait after the context's
+  `:transition`, and the new state.
   """
-  @callback timeout(transition :: transition(), state :: state()) ::
+  @callback timeout(context :: context(), state :: state()) ::
               {timeout :: non_neg_integer(), state :: state()}
 end
