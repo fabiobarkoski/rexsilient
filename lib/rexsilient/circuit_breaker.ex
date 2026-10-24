@@ -163,8 +163,15 @@ defmodule Rexsilient.CircuitBreaker do
       {{^state_counter, @probing}, :success} ->
         if strategy.record(strategy_state, result, 0) == :ok and
              :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) ==
-               :ok,
-           do: strategy.reset(strategy_state)
+               :ok do
+          strategy.reset(strategy_state)
+
+          Rexsilient.Notifier.notify(:closed, :circuit_breaker, %{
+            name: name,
+            from: :probing,
+            system_time: System.system_time()
+          })
+        end
 
       {{^state_counter, @probing}, :failure} ->
         if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) ==
@@ -352,22 +359,46 @@ defmodule Rexsilient.CircuitBreaker do
     case acquire(name) do
       {:ok, state_counter} ->
         %{classify: {classify_value, classify_exception}} = fetch_config!(name)
+        start = Rexsilient.Notifier.notify_start(:circuit_breaker, %{name: name})
 
         try do
           func.()
         catch
           kind, reason ->
-            release(name, classify_exception.(kind, reason), state_counter, {kind, reason})
+            finish(name, classify_exception.(kind, reason), state_counter, {kind, reason}, start)
             :erlang.raise(kind, reason, __STACKTRACE__)
         else
           result ->
-            release(name, classify_value.(result), state_counter, {:value, result})
+            finish(name, classify_value.(result), state_counter, {:value, result}, start)
             result
         end
 
       {:error, :circuit_open} ->
+        Rexsilient.Notifier.notify(:rejected, :circuit_breaker, %{
+          name: name,
+          system_time: System.system_time()
+        })
+
         Keyword.get(opts, :on_open, {:error, :circuit_open})
     end
+  end
+
+  defp finish(name, result, state_counter, outcome, start) do
+    release(name, result, state_counter, outcome)
+
+    Rexsilient.Notifier.notify_stop(:circuit_breaker, start, %{
+      name: name,
+      result: result,
+      outcome: outcome
+    })
+  end
+
+  defp notify_transition(name, from, to, info \\ %{}) do
+    Rexsilient.Notifier.notify_from_manager(
+      to,
+      :circuit_breaker,
+      Map.merge(info, %{name: name, from: from, system_time: System.system_time()})
+    )
   end
 
   @doc false
@@ -398,8 +429,13 @@ defmodule Rexsilient.CircuitBreaker do
   def handle_call({:open, name}, _from, state) do
     case Map.fetch(state, name) do
       {:ok, %{ref: ref}} ->
-        {state_counter, _status} = unpack(:atomics.get(ref, @state))
+        {state_counter, status} = unpack(:atomics.get(ref, @state))
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @open))
+        notify_transition(name, get_status(status), :open, %{
+          timeout: :infinity,
+          outcome: nil,
+          forced: true
+        })
         {:reply, :ok, state}
 
       :error ->
@@ -411,9 +447,10 @@ defmodule Rexsilient.CircuitBreaker do
   def handle_call({:close, name}, _from, state) do
     case Map.fetch(state, name) do
       {:ok, %{ref: ref, strategy: {strategy, strategy_state}}} ->
-        {state_counter, _status} = unpack(:atomics.get(ref, @state))
+        {state_counter, status} = unpack(:atomics.get(ref, @state))
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @closed))
         :ok = strategy.reset(strategy_state)
+        notify_transition(name, get_status(status), :closed, %{forced: true})
         {:reply, :ok, state}
 
       :error ->
@@ -425,35 +462,28 @@ defmodule Rexsilient.CircuitBreaker do
   def handle_info({:half_open, name, status, state_counter}, state) do
     %{ref: ref} = Map.fetch!(state, name)
 
-    case status do
-      :probing ->
-        :atomics.compare_exchange(
-          ref,
-          @state,
-          pack(state_counter, @probing),
-          pack(state_counter + 1, @half_open)
-        )
+    expected =
+      case status do
+        :probing -> pack(state_counter, @probing)
+        :open -> pack(state_counter, @open)
+      end
 
-      :open ->
-        :atomics.compare_exchange(
-          ref,
-          @state,
-          pack(state_counter, @open),
-          pack(state_counter + 1, @half_open)
-        )
-    end
+    if :atomics.compare_exchange(ref, @state, expected, pack(state_counter + 1, @half_open)) ==
+         :ok,
+       do: notify_transition(name, status, :half_open)
 
     {:noreply, state}
   end
 
   @impl true
-  def handle_cast({:release, name, {_from, to} = transition, state_counter, outcome}, state) do
+  def handle_cast({:release, name, {from, to} = transition, state_counter, outcome}, state) do
     %{recover: {recover, recover_state}} = config = Map.fetch!(state, name)
 
     {timeout, recover_state} =
       recover.timeout(%{transition: transition, outcome: outcome}, recover_state)
 
     Process.send_after(self(), {:half_open, name, to, state_counter}, timeout)
+    notify_transition(name, from, to, %{timeout: timeout, outcome: outcome})
 
     {:noreply, Map.put(state, name, %{config | recover: {recover, recover_state}})}
   end

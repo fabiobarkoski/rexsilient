@@ -74,29 +74,33 @@ defmodule Rexsilient.Fallback do
   end
 
   defp call(config, func, args) do
-    %{
-      classify: {classify_value, classify_exception},
-      function: {func_mod, func_name}
-    } = config
+    %{classify: {classify_value, classify_exception}} = config
 
     try do
       func.()
     catch
       kind, reason ->
         case classify_exception.(kind, reason) do
-          :failure -> apply(func_mod, func_name, args)
+          :failure -> use_fallback(config, args, {kind, reason})
           :success -> :erlang.raise(kind, reason, __STACKTRACE__)
         end
     else
-      {:error, :circuit_open} ->
-        apply(func_mod, func_name, args)
+      {:error, :circuit_open} = result ->
+        use_fallback(config, args, {:value, result})
 
       result ->
         case classify_value.(result) do
-          :failure -> apply(func_mod, func_name, args)
+          :failure -> use_fallback(config, args, {:value, result})
           :success -> result
         end
     end
+  end
+
+  defp use_fallback(%{name: name, function: {func_mod, func_name}}, args, outcome) do
+    start = Rexsilient.Notifier.notify_start(:fallback, %{name: name, outcome: outcome})
+    value = apply(func_mod, func_name, args)
+    Rexsilient.Notifier.notify_stop(:fallback, start, %{name: name, outcome: {:value, value}})
+    value
   end
 
   @doc false

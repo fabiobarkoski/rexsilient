@@ -70,14 +70,19 @@ defmodule Rexsilient do
       Raises `ArgumentError` if two declarations of the same kind share a
       name.
 
+    * `:notifiers` - the modules told what the patterns are doing; see
+      `Rexsilient.Notifier`. Defaults to
+      `[Rexsilient.Notifier.TelemetryNotifier]`; `[]` sends nothing.
+
   ## Examples
 
       children = [
-        {Rexsilient, modules: [MyApp.Breakers]}
+        {Rexsilient, modules: [MyApp.Breakers], notifiers: [MyApp.Notifier]}
       ]
 
   """
-  @spec child_spec(opts :: [modules: [module()]]) :: Supervisor.child_spec()
+  @spec child_spec(opts :: [modules: [module()], notifiers: [module()]]) ::
+          Supervisor.child_spec()
   def child_spec(opts), do: Rexsilient.Supervisor.child_spec(opts)
 
   @doc false

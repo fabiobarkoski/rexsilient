@@ -1,6 +1,8 @@
 defmodule Rexsilient.Supervisor do
   @moduledoc false
 
+  alias Rexsilient.Notifier.TelemetryNotifier
+
   use Supervisor
 
   def start_link(opts) do
@@ -11,13 +13,13 @@ defmodule Rexsilient.Supervisor do
   def init(opts) do
     modules = Keyword.fetch!(opts, :modules)
 
-    # Fallbacks and retries have no runtime state, so they are installed here
-    # instead of in a process of their own.
     :ok = Rexsilient.Fallback.__install__(modules)
     :ok = Rexsilient.Retry.__install__(modules)
     :ok = Rexsilient.Policy.__install__(modules)
 
     children = [
+      {Task.Supervisor, name: Rexsilient.Notifier.TaskSupervisor},
+      {Rexsilient.Notifier, notifiers: Keyword.get(opts, :notifiers, [TelemetryNotifier])},
       {Rexsilient.CircuitBreaker, modules: modules}
     ]
 

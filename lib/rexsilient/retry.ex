@@ -77,7 +77,7 @@ defmodule Rexsilient.Retry do
   @spec run(name(), func :: (-> term())) :: term()
   def run(name, func) do
     %{strategy: {_strategy, state}} = config = fetch_config!(name)
-    attempt(config, func, 1, state)
+    attempt(config, func, 1, state, System.monotonic_time())
   end
 
   @doc false
@@ -85,23 +85,39 @@ defmodule Rexsilient.Retry do
     run(Keyword.fetch!(opts, :name), func)
   end
 
-  defp attempt(config, func, attempt, state) do
-    %{attempts: attempts, strategy: {strategy, _}, classify: classify} = config
+  defp attempt(config, func, attempt, state, run_start) do
+    %{name: name, attempts: attempts, strategy: {strategy, _}, classify: classify} = config
 
-    case call(func, classify) do
-      {:failure, outcome, stacktrace} when attempt != attempts ->
+    start = Rexsilient.Notifier.notify_start(:retry, %{name: name, attempt: attempt})
+    {result, outcome, stacktrace} = call(func, classify)
+    info = %{name: name, attempt: attempt, outcome: outcome}
+    Rexsilient.Notifier.notify_stop(:retry, start, Map.put(info, :result, result))
+
+    case result do
+      :failure when attempt != attempts ->
         case strategy.delay(%{attempt: attempt, outcome: outcome}, state) do
           {:retry, delay, state} ->
+            Rexsilient.Notifier.notify(:delay, :retry, Map.put(info, :delay, delay))
             Process.sleep(delay)
-            attempt(config, func, attempt + 1, state)
+            attempt(config, func, attempt + 1, state, run_start)
 
           :stop ->
+            give_up(info, :strategy, run_start)
             finish(outcome, stacktrace)
         end
 
-      {_result, outcome, stacktrace} ->
+      :failure ->
+        give_up(info, :attempts, run_start)
+        finish(outcome, stacktrace)
+
+      :success ->
         finish(outcome, stacktrace)
     end
+  end
+
+  defp give_up(info, reason, run_start) do
+    info = Map.merge(info, %{reason: reason, duration: System.monotonic_time() - run_start})
+    Rexsilient.Notifier.notify(:stop, :retry, info)
   end
 
   defp call(func, {classify_value, classify_exception}) do
@@ -147,6 +163,7 @@ defmodule Rexsilient.Retry do
     :ok = Rexsilient.Options.implements!(strategy, __MODULE__.Strategy, "retry #{inspect(name)}")
 
     %{
+      name: name,
       attempts: Keyword.fetch!(opts, :attempts),
       strategy: {strategy, init_strategy!(name, strategy, strategy_opts)},
       classify: Rexsilient.Classify.__resolve__(module, classify)

@@ -56,8 +56,10 @@ defmodule Rexsilient.MixProject do
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
       {:ex_doc, "~> 0.40.4", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5", only: :bench},
-      {:fuse, "~> 2.5", only: :bench}
+      {:fuse, "~> 2.5", only: :bench},
+      {:telemetry, "~> 1.4"}
     ]
   end
 
