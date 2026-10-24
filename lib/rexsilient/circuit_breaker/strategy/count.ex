@@ -18,7 +18,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy.Count do
 
   @impl true
   def init(opts) do
-    %{threshold: threshold} = Rexsilient.Options.validate!(opts, threshold: :pos_integer)
+    %{threshold: threshold} = Rexsilient.Utils.validate!(opts, threshold: :pos_integer)
     ref = :atomics.new(1, [])
     :ok = :atomics.put(ref, 1, 0)
 

@@ -1,4 +1,4 @@
-defmodule Rexsilient.Options do
+defmodule Rexsilient.Utils do
   @moduledoc false
 
   @type type :: :pos_integer | :non_neg_integer

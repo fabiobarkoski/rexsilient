@@ -16,7 +16,7 @@ defmodule Rexsilient.Retry.Strategy.Constant do
 
   @impl true
   def init(opts) do
-    Rexsilient.Options.validate!(opts, delay: :non_neg_integer)
+    Rexsilient.Utils.validate!(opts, delay: :non_neg_integer)
   end
 
   @impl true

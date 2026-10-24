@@ -102,6 +102,34 @@ defmodule Rexsilient.CircuitBreakerTest.UnavailableRecoverBreakers do
   end
 end
 
+# record/3 runs in the caller, so it reports to the calling process. Trips on
+# the first failure.
+defmodule Rexsilient.CircuitBreakerTest.RecordingStrategy do
+  @behaviour Rexsilient.CircuitBreaker.Strategy
+
+  @impl true
+  def init(_opts), do: nil
+
+  @impl true
+  def record(_state, result, duration) do
+    send(self(), {:record, result, duration})
+    if result == :failure, do: :trip, else: :ok
+  end
+
+  @impl true
+  def reset(_state), do: :ok
+end
+
+defmodule Rexsilient.CircuitBreakerTest.RecordingBreakers do
+  use Rexsilient
+  alias Rexsilient.CircuitBreaker
+
+  circuit_breaker :cb_test do
+    strategy(Rexsilient.CircuitBreakerTest.RecordingStrategy, [])
+    recover(CircuitBreaker.Recover.BasicTimeout, reset_timeout: 50, probing_timeout: 5_000)
+  end
+end
+
 defmodule Rexsilient.CircuitBreakerTest do
   # The manager is a named singleton and breakers live in :persistent_term, so
   # these tests cannot run concurrently with each other.
@@ -116,6 +144,7 @@ defmodule Rexsilient.CircuitBreakerTest do
     CustomExceptionBreakers,
     CustomFailureBreakers,
     ReconfiguredBreakers,
+    RecordingBreakers,
     ShortProbingBreakers,
     SlidingWindowBreakers
   }
@@ -514,6 +543,38 @@ defmodule Rexsilient.CircuitBreakerTest do
       assert_raise ArgumentError, "unknown circuit breaker :nope", fn -> CB.force_open(:nope) end
       assert_raise ArgumentError, "unknown circuit breaker :nope", fn -> CB.force_close(:nope) end
       assert Process.whereis(CB) == pid
+    end
+  end
+
+  describe "strategy record/3" do
+    setup do
+      restart([RecordingBreakers])
+      :ok
+    end
+
+    test "gets successes and failures with their duration" do
+      CB.run(@name, fn -> :ok end)
+      assert_received {:record, :success, duration} when is_integer(duration)
+
+      CB.run(@name, fn -> {:error, :down} end)
+      assert_received {:record, :failure, duration} when is_integer(duration)
+    end
+
+    test "gets nil as the duration from release/4" do
+      {:ok, state_counter} = CB.acquire(@name)
+      CB.release(@name, :success, state_counter)
+      assert_received {:record, :success, nil}
+    end
+
+    test "is not called for the probe" do
+      CB.run(@name, fn -> {:error, :down} end)
+      assert_received {:record, :failure, _}
+
+      wait_until(fn -> CB.status(@name) == :half_open end)
+      CB.run(@name, fn -> :ok end)
+
+      assert CB.status(@name) == :closed
+      refute_received {:record, _, _}
     end
   end
 

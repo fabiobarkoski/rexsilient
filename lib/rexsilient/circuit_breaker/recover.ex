@@ -51,9 +51,9 @@ defmodule Rexsilient.CircuitBreaker.Recover do
 
     * `:transition` - the change of state that starts the timer.
 
-    * `:outcome` - the failure that opened the breaker, for `{:closed, :open}`
-      and `{:probing, :open}`. When a strategy opens the breaker after several
-      failures, it is the last one. `nil` for `{:half_open, :probing}`, and
+    * `:outcome` - the outcome of the call that opened the breaker, for
+      `{:closed, :open}` and `{:probing, :open}`. When a strategy opens the
+      breaker after several calls, it is the last one. `nil` for `{:half_open, :probing}`, and
       when the failure was recorded with
       `Rexsilient.CircuitBreaker.release/4` without an outcome.
 

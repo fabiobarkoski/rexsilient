@@ -20,8 +20,8 @@ defmodule Rexsilient.CircuitBreaker do
 
   A breaker is always in one of four states, returned by `status/1`:
 
-    * `:closed` - calls go through. Failures are passed to the breaker's
-      `strategy`, which decides when it opens.
+    * `:closed` - calls go through. Their results are passed to the
+      breaker's `strategy`, which decides when it opens.
 
     * `:open` - calls are rejected without reaching the dependency. After the
       time set by its `recover` module, the breaker becomes half-open.
@@ -155,15 +155,17 @@ defmodule Rexsilient.CircuitBreaker do
           state_counter(),
           Rexsilient.Classify.outcome() | nil
         ) :: :ok
-  def release(name, result, state_counter, outcome \\ nil) do
+  def release(name, result, state_counter, outcome \\ nil),
+    do: release(name, result, state_counter, outcome, nil)
+
+  defp release(name, result, state_counter, outcome, duration) do
     %{ref: ref, strategy: {strategy, strategy_state}} = fetch_config!(name)
     state_value = :atomics.get(ref, @state)
 
     case {unpack(state_value), result} do
       {{^state_counter, @probing}, :success} ->
-        if strategy.record(strategy_state, result, 0) == :ok and
-             :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) ==
-               :ok do
+        if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) ==
+             :ok do
           strategy.reset(strategy_state)
 
           Rexsilient.Notifier.notify(:closed, :circuit_breaker, %{
@@ -176,21 +178,13 @@ defmodule Rexsilient.CircuitBreaker do
       {{^state_counter, @probing}, :failure} ->
         if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) ==
              :ok,
-           do:
-             GenServer.cast(
-               __MODULE__,
-               {:release, name, {:probing, :open}, state_counter + 1, outcome}
-             )
+           do: cast_transition(name, {:probing, :open}, state_counter + 1, outcome)
 
-      {{^state_counter, @closed}, :failure} ->
-        if strategy.record(strategy_state, result, 0) == :trip and
+      {{^state_counter, @closed}, _} ->
+        if strategy.record(strategy_state, result, duration) == :trip and
              :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @open)) ==
                :ok,
-           do:
-             GenServer.cast(
-               __MODULE__,
-               {:release, name, {:closed, :open}, state_counter + 1, outcome}
-             )
+           do: cast_transition(name, {:closed, :open}, state_counter + 1, outcome)
 
       _ ->
         :ok
@@ -262,6 +256,11 @@ defmodule Rexsilient.CircuitBreaker do
   After an allowed call, pass its result, `state_counter` and outcome to
   `release/4`.
 
+  They are only the breaker's state machine, without anything `run/3` adds
+  around it: no `classify`, no catching of raises, throws and exits, no
+  `:on_open`, and no `:before`, `:after` or `:rejected` notifications. Only
+  the state changes caused by `release/4` are notified.
+
   Raises `ArgumentError` if no breaker is registered under `name`.
 
   ## Examples
@@ -309,10 +308,7 @@ defmodule Rexsilient.CircuitBreaker do
                pack(state_counter + 1, @probing)
              ) do
           :ok ->
-            GenServer.cast(
-              __MODULE__,
-              {:release, name, {:half_open, :probing}, state_counter + 1, nil}
-            )
+            cast_transition(name, {:half_open, :probing}, state_counter + 1, nil)
 
             {:ok, state_counter + 1 &&& @state_mask}
 
@@ -384,7 +380,7 @@ defmodule Rexsilient.CircuitBreaker do
   end
 
   defp finish(name, result, state_counter, outcome, start) do
-    release(name, result, state_counter, outcome)
+    release(name, result, state_counter, outcome, System.monotonic_time() - start)
 
     Rexsilient.Notifier.notify_stop(:circuit_breaker, start, %{
       name: name,
@@ -393,12 +389,20 @@ defmodule Rexsilient.CircuitBreaker do
     })
   end
 
-  defp notify_transition(name, from, to, info \\ %{}) do
-    Rexsilient.Notifier.notify_from_manager(
-      to,
-      :circuit_breaker,
-      Map.merge(info, %{name: name, from: from, system_time: System.system_time()})
+  defp cast_transition(name, transition, state_counter, outcome) do
+    GenServer.cast(
+      __MODULE__,
+      {:transition, name, transition, state_counter, outcome, System.system_time()}
     )
+  end
+
+  defp notify_transition(name, from, to, info \\ %{}) do
+    state =
+      info
+      |> Map.merge(%{name: name, from: from})
+      |> Map.put_new_lazy(:system_time, &System.system_time/0)
+
+    Rexsilient.Notifier.notify_from_manager(to, :circuit_breaker, state)
   end
 
   @doc false
@@ -476,14 +480,21 @@ defmodule Rexsilient.CircuitBreaker do
   end
 
   @impl true
-  def handle_cast({:release, name, {from, to} = transition, state_counter, outcome}, state) do
+  def handle_cast(
+        {:transition, name, {from, to} = transition, state_counter, outcome, system_time},
+        state
+      ) do
     %{recover: {recover, recover_state}} = config = Map.fetch!(state, name)
 
     {timeout, recover_state} =
       recover.timeout(%{transition: transition, outcome: outcome}, recover_state)
 
     Process.send_after(self(), {:half_open, name, to, state_counter}, timeout)
-    notify_transition(name, from, to, %{timeout: timeout, outcome: outcome})
+    notify_transition(name, from, to, %{
+      timeout: timeout,
+      outcome: outcome,
+      system_time: system_time
+    })
 
     {:noreply, Map.put(state, name, %{config | recover: {recover, recover_state}})}
   end
@@ -497,8 +508,8 @@ defmodule Rexsilient.CircuitBreaker do
     classify = Keyword.get(opts, :classify_with, :classify)
 
     owner = "circuit breaker #{inspect(name)}"
-    :ok = Rexsilient.Options.implements!(strategy, __MODULE__.Strategy, owner)
-    :ok = Rexsilient.Options.implements!(recover, __MODULE__.Recover, owner)
+    :ok = Rexsilient.Utils.implements!(strategy, __MODULE__.Strategy, owner)
+    :ok = Rexsilient.Utils.implements!(recover, __MODULE__.Recover, owner)
 
     config = %{
       module: module,
@@ -518,8 +529,12 @@ defmodule Rexsilient.CircuitBreaker do
       %{ref: ref} ->
         config = Map.put(config, :ref, ref)
         :persistent_term.put(key, config)
-        {state_counter, _} = unpack(:atomics.get(ref, @state))
+        {state_counter, status} = unpack(:atomics.get(ref, @state))
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @closed))
+
+        if status != @closed,
+          do: notify_transition(name, get_status(status), :closed, %{restart: true})
+
         config
     end
   end

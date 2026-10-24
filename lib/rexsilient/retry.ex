@@ -45,7 +45,8 @@ defmodule Rexsilient.Retry do
   threw or exited with, re-raised with its original stacktrace.
 
   `{:error, :circuit_open}` is never retried: a circuit breaker just said the
-  dependency is down, and retrying would only wait for the same answer.
+  dependency is down, and retrying would only wait for the same answer. It is
+  a failure whatever `classify` says, and it ends the run at once.
 
   The delay runs in the calling process, with `Process.sleep/1`.
 
@@ -94,6 +95,10 @@ defmodule Rexsilient.Retry do
     Rexsilient.Notifier.notify_stop(:retry, start, Map.put(info, :result, result))
 
     case result do
+      :failure when outcome == {:value, {:error, :circuit_open}} ->
+        give_up(info, :circuit_open, run_start)
+        finish(outcome, stacktrace)
+
       :failure when attempt != attempts ->
         case strategy.delay(%{attempt: attempt, outcome: outcome}, state) do
           {:retry, delay, state} ->
@@ -126,7 +131,7 @@ defmodule Rexsilient.Retry do
     catch
       kind, reason -> {classify_exception.(kind, reason), {kind, reason}, __STACKTRACE__}
     else
-      {:error, :circuit_open} = value -> {:success, {:value, value}, nil}
+      {:error, :circuit_open} = value -> {:failure, {:value, value}, nil}
       value -> {classify_value.(value), {:value, value}, nil}
     end
   end
@@ -160,7 +165,7 @@ defmodule Rexsilient.Retry do
     {strategy, strategy_opts} = Keyword.fetch!(opts, :strategy)
     classify = Keyword.get(opts, :classify_with, :classify)
 
-    :ok = Rexsilient.Options.implements!(strategy, __MODULE__.Strategy, "retry #{inspect(name)}")
+    :ok = Rexsilient.Utils.implements!(strategy, __MODULE__.Strategy, "retry #{inspect(name)}")
 
     %{
       name: name,

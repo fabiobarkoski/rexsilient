@@ -32,14 +32,20 @@ defmodule Rexsilient.CircuitBreaker.Strategy do
   @doc """
   Records the result of a call.
 
-  Called while the breaker is closed, and for a successful probe. Return
-  `:trip` to open the breaker, `:ok` otherwise. `duration` is reserved and is
-  currently always `0`.
+  Called for every call made while the breaker is closed, successes
+  included; probes are not recorded. Return `:trip` to open the breaker,
+  `:ok` otherwise.
+
+  `duration` is how long the call took, in `:native` time units, or `nil`
+  when it was released with `Rexsilient.CircuitBreaker.release/4` directly.
+  To compare it with an option given in milliseconds, convert the option
+  once in `init/1` with `System.convert_time_unit(value, :millisecond, :native)`
+  instead of converting every duration.
   """
   @callback record(
               state :: state(),
               result :: Rexsilient.Classify.result(),
-              duration :: non_neg_integer()
+              duration :: non_neg_integer() | nil
             ) :: :ok | :trip
 
   @doc """

@@ -14,6 +14,13 @@ defmodule Rexsilient.NotifierTest.Raiser do
   def notify(_moment, _kind, _state), do: raise("notifier boom")
 end
 
+defmodule Rexsilient.NotifierTest.Sleeper do
+  @behaviour Rexsilient.Notifier
+
+  @impl true
+  def notify(_moment, _kind, _state), do: Process.sleep(:infinity)
+end
+
 defmodule Rexsilient.NotifierTest.Stopper do
   @behaviour Rexsilient.Retry.Strategy
 
@@ -55,9 +62,11 @@ defmodule Rexsilient.NotifierTest do
   # Notifiers live in :persistent_term, and the processes are registered by name.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Rexsilient.{CircuitBreaker, Fallback, Notifier, Retry}
   alias Rexsilient.Notifier.TelemetryNotifier
-  alias Rexsilient.NotifierTest.{Raiser, Recorder, Resilience}
+  alias Rexsilient.NotifierTest.{Raiser, Recorder, Resilience, Sleeper}
 
   defp start!(notifiers) do
     start_supervised!({Rexsilient, modules: [Resilience], notifiers: notifiers})
@@ -126,6 +135,24 @@ defmodule Rexsilient.NotifierTest do
       Retry.run(:nt_stop, fn -> {:error, :down} end)
 
       assert_receive {:notify, :stop, :retry, %{name: :nt_stop, attempt: 1, reason: :strategy}}
+      refute_receive {:notify, :delay, :retry, _}
+    end
+
+    test "retry stop says when a breaker rejected the attempt" do
+      start!([Recorder])
+
+      assert Retry.run(:nt_retry, fn -> {:error, :circuit_open} end) == {:error, :circuit_open}
+
+      assert_receive {:notify, :after, :retry, %{attempt: 1, result: :failure}}
+
+      assert_receive {:notify, :stop, :retry,
+                      %{
+                        name: :nt_retry,
+                        attempt: 1,
+                        reason: :circuit_open,
+                        outcome: {:value, {:error, :circuit_open}}
+                      }}
+
       refute_receive {:notify, :delay, :retry, _}
     end
 
@@ -204,6 +231,31 @@ defmodule Rexsilient.NotifierTest do
       assert_receive {:notify, :closed, :circuit_breaker, %{from: :open, forced: true}}
     end
 
+    test "a state change carries the time it happened, not when it was handled" do
+      start!([Recorder])
+      :sys.suspend(CircuitBreaker)
+
+      CircuitBreaker.run(:nt_breaker, fn -> {:error, :down} end)
+      tripped = System.system_time()
+      Process.sleep(50)
+      :sys.resume(CircuitBreaker)
+
+      assert_receive {:notify, :open, :circuit_breaker, %{system_time: system_time}}
+      assert system_time <= tripped
+    end
+
+    test "a manager restart notifies the breakers it closes" do
+      start!([Recorder])
+
+      CircuitBreaker.force_open(:nt_breaker)
+      assert_receive {:notify, :open, :circuit_breaker, %{forced: true}}
+
+      Process.exit(Process.whereis(CircuitBreaker), :kill)
+
+      assert_receive {:notify, :closed, :circuit_breaker,
+                      %{name: :nt_breaker, from: :open, restart: true, system_time: _}}
+    end
+
     @tag :capture_log
     test "a raising notifier does not stop the others" do
       start!([Raiser, Recorder])
@@ -212,6 +264,19 @@ defmodule Rexsilient.NotifierTest do
 
       assert moments(:retry, 2) == [:before, :after]
       assert Process.alive?(Process.whereis(Notifier))
+    end
+
+    # Waits for the 5 s adapter timeout.
+    test "a notifier that times out is killed and logged" do
+      start!([Sleeper, Recorder])
+
+      log =
+        capture_log(fn ->
+          Retry.run(:nt_retry, fn -> :ok end)
+          assert_receive {:notify, :after, :retry, _}, 6_000
+        end)
+
+      assert log =~ "notifier Rexsilient.NotifierTest.Sleeper timed out on :before :retry"
     end
 
     test "a module that is not a notifier is rejected" do

@@ -41,8 +41,11 @@ defmodule Rexsilient.Notifier do
 
     * `:rejected` - the breaker rejected the call, with its `:system_time`.
 
+  Calls made with `Rexsilient.CircuitBreaker.acquire/1` and
+  `Rexsilient.CircuitBreaker.release/4` directly send none of these.
+
   `:circuit_breaker`, when the breaker changes state, with the state it was
-  in as `:from`, and the `:system_time` at which the change was notified:
+  in as `:from`, and the `:system_time` at which the change happened:
 
     * `:open` - it opened, with the `:timeout` before it becomes half-open,
       and the `:outcome` that opened it. When forced with
@@ -54,10 +57,12 @@ defmodule Rexsilient.Notifier do
     * `:probing` - a probe started, with the `:timeout` before another one
       is let through.
 
-    * `:closed` - a probe succeeded, or it was forced closed.
+    * `:closed` - a probe succeeded, it was forced closed, or the breaker
+      manager restarted while it was not closed.
 
   A change made with `Rexsilient.CircuitBreaker.force_open/1` or
-  `Rexsilient.CircuitBreaker.force_close/1` also has `forced: true`.
+  `Rexsilient.CircuitBreaker.force_close/1` also has `forced: true`, and
+  one made by a manager restart has `restart: true`.
 
   `:retry`:
 
@@ -70,7 +75,8 @@ defmodule Rexsilient.Notifier do
 
     * `:stop` - it failed and no attempt follows, with its `:attempt`,
       `:outcome`, the `:duration` of the whole run, and the `:reason`:
-      `:attempts` when none remain, `:strategy` when the strategy stopped.
+      `:attempts` when none remain, `:strategy` when the strategy stopped,
+      `:circuit_open` when the attempt returned `{:error, :circuit_open}`.
 
   `:fallback`, only when the fallback function is called:
 
@@ -95,8 +101,13 @@ defmodule Rexsilient.Notifier do
   next notification waits for all of them, so each notifier sees them in the
   order the notifier process received them. A notifier that raises or exits
   only crashes its own task, which logs the error; one that takes longer than
-  5 seconds is killed. Either way it is skipped for that notification, and
+  5 seconds is killed, and the timeout is logged. Either way it is skipped for that notification, and
   the others are not affected.
+
+  Notifications wait in the notifier process's mailbox, which has no limit.
+  When they arrive faster than the notifiers handle them, for example with a
+  notifier that takes a few milliseconds under high traffic, they arrive
+  later and later, and the mailbox, and so memory, keeps growing.
 
   `Rexsilient.Notifier.TelemetryNotifier`, the default, is the exception: it
   is called in the calling process, like any `:telemetry` event, so its
@@ -106,6 +117,8 @@ defmodule Rexsilient.Notifier do
   """
 
   use GenServer
+
+  require Logger
 
   alias Rexsilient.Notifier.TelemetryNotifier
 
@@ -182,7 +195,7 @@ defmodule Rexsilient.Notifier do
     notifiers = Keyword.fetch!(opts, :notifiers)
 
     for notifier <- notifiers do
-      :ok = Rexsilient.Options.implements!(notifier, __MODULE__, "notifier")
+      :ok = Rexsilient.Utils.implements!(notifier, __MODULE__, "notifier")
     end
 
     :persistent_term.put({__MODULE__, :notifiers}, notifiers)
@@ -196,9 +209,18 @@ defmodule Rexsilient.Notifier do
       notifiers,
       & &1.notify(moment, kind, state),
       timeout: @timeout,
-      on_timeout: :kill_task
+      on_timeout: :kill_task,
+      zip_input_on_exit: true
     )
-    |> Stream.run()
+    |> Enum.each(fn
+      {:exit, {notifier, :timeout}} ->
+        Logger.error(
+          "notifier #{inspect(notifier)} timed out on #{inspect(moment)} #{inspect(kind)}"
+        )
+
+      _ ->
+        :ok
+    end)
 
     {:noreply, server_state}
   end

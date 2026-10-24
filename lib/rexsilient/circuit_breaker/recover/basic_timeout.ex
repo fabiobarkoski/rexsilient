@@ -23,7 +23,7 @@ defmodule Rexsilient.CircuitBreaker.Recover.BasicTimeout do
 
   @impl true
   def init(opts) do
-    Rexsilient.Options.validate!(opts,
+    Rexsilient.Utils.validate!(opts,
       reset_timeout: :non_neg_integer,
       probing_timeout: :pos_integer
     )
