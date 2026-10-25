@@ -126,14 +126,12 @@ defmodule Rexsilient.Retry do
   end
 
   defp call(func, {classify_value, classify_exception}) do
-    try do
-      func.()
-    catch
-      kind, reason -> {classify_exception.(kind, reason), {kind, reason}, __STACKTRACE__}
-    else
-      {:error, :circuit_open} = value -> {:failure, {:value, value}, nil}
-      value -> {classify_value.(value), {:value, value}, nil}
-    end
+    func.()
+  catch
+    kind, reason -> {classify_exception.(kind, reason), {kind, reason}, __STACKTRACE__}
+  else
+    {:error, :circuit_open} = value -> {:failure, {:value, value}, nil}
+    value -> {classify_value.(value), {:value, value}, nil}
   end
 
   defp finish({:value, value}, _stacktrace), do: value

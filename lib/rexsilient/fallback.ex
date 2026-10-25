@@ -64,7 +64,7 @@ defmodule Rexsilient.Fallback do
   """
   @spec run(name(), func :: (term() -> term()), args :: term()) :: term()
   def run(name, func, args \\ []) do
-    call(fetch_config!(name), fn -> apply(func, [args]) end, [args])
+    call(fetch_config!(name), fn -> func.(args) end, [args])
   end
 
   @doc false

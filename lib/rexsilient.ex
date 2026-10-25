@@ -60,6 +60,8 @@ defmodule Rexsilient do
   expressions such as `:timer.seconds(30)` are allowed.
   """
 
+  @dialyzer {:no_return, function_error!: 2}
+
   @doc """
   Returns a child specification that registers the declarations of the given
   modules and starts the processes they need.
@@ -297,29 +299,7 @@ defmodule Rexsilient do
 
   @doc false
   defmacro __before_compile__(env) do
-    breakers =
-      env.module
-      |> Module.get_attribute(:circuit_breakers)
-      |> Enum.reverse()
-
-    fallbacks =
-      env.module
-      |> Module.get_attribute(:fallbacks)
-      |> Enum.reverse()
-
-    retries =
-      env.module
-      |> Module.get_attribute(:retries)
-      |> Enum.reverse()
-
-    policies =
-      env.module
-      |> Module.get_attribute(:policies)
-      |> Enum.reverse()
-
-    if breakers == [] and fallbacks == [] and retries == [] and policies == [] do
-      IO.warn("#{inspect(env.module)} uses Rexsilient but declares nothing", env)
-    end
+    {breakers, fallbacks, retries, policies} = get_declarations(env)
 
     classifiers = Module.get_attribute(env.module, :classifiers, [])
     Module.delete_attribute(env.module, :classifiers)
@@ -446,6 +426,34 @@ defmodule Rexsilient do
 
   defp declaration(current_attr, attr_value),
     do: "#{block_kind(current_attr)} #{inspect(attr_value[:name])}"
+
+  defp get_declarations(env) do
+    breakers =
+      env.module
+      |> Module.get_attribute(:circuit_breakers)
+      |> Enum.reverse()
+
+    fallbacks =
+      env.module
+      |> Module.get_attribute(:fallbacks)
+      |> Enum.reverse()
+
+    retries =
+      env.module
+      |> Module.get_attribute(:retries)
+      |> Enum.reverse()
+
+    policies =
+      env.module
+      |> Module.get_attribute(:policies)
+      |> Enum.reverse()
+
+    if breakers == [] and fallbacks == [] and retries == [] and policies == [] do
+      IO.warn("#{inspect(env.module)} uses Rexsilient but declares nothing", env)
+    end
+
+    {breakers, fallbacks, retries, policies}
+  end
 
   @doc false
   def __save__(mod, location, required_macros) do

@@ -435,11 +435,13 @@ defmodule Rexsilient.CircuitBreaker do
       {:ok, %{ref: ref}} ->
         {state_counter, status} = unpack(:atomics.get(ref, @state))
         :ok = :atomics.put(ref, @state, pack(state_counter + 1, @open))
+
         notify_transition(name, get_status(status), :open, %{
           timeout: :infinity,
           outcome: nil,
           forced: true
         })
+
         {:reply, :ok, state}
 
       :error ->
@@ -490,6 +492,7 @@ defmodule Rexsilient.CircuitBreaker do
       recover.timeout(%{transition: transition, outcome: outcome}, recover_state)
 
     Process.send_after(self(), {:half_open, name, to, state_counter}, timeout)
+
     notify_transition(name, from, to, %{
       timeout: timeout,
       outcome: outcome,

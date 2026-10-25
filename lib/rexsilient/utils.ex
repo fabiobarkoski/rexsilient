@@ -16,18 +16,7 @@ defmodule Rexsilient.Utils do
 
     opts = Keyword.validate!(opts, Keyword.keys(spec))
 
-    for {key, type} <- spec, into: %{} do
-      case Keyword.fetch(opts, key) do
-        {:ok, value} ->
-          if !valid?(type, value),
-            do: raise(ArgumentError, "#{key} must be #{describe(type)}, got: #{inspect(value)}")
-
-          {key, value}
-
-        :error ->
-          raise ArgumentError, "#{key} is required"
-      end
-    end
+    for {key, type} <- spec, into: %{}, do: {key, fetch!(opts, key, type)}
   end
 
   @doc """
@@ -62,4 +51,17 @@ defmodule Rexsilient.Utils do
 
   defp describe(:pos_integer), do: "a positive integer"
   defp describe(:non_neg_integer), do: "a non-negative integer"
+
+  defp fetch!(opts, key, type) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} ->
+        if !valid?(type, value),
+          do: raise(ArgumentError, "#{key} must be #{describe(type)}, got: #{inspect(value)}")
+
+        value
+
+      :error ->
+        raise ArgumentError, "#{key} is required"
+    end
+  end
 end
