@@ -164,10 +164,10 @@ defmodule Rexsilient.CircuitBreaker do
 
     case {unpack(state_value), result} do
       {{^state_counter, @probing}, :success} ->
+        strategy.reset(strategy_state)
+
         if :atomics.compare_exchange(ref, @state, state_value, pack(state_counter + 1, @closed)) ==
              :ok do
-          strategy.reset(strategy_state)
-
           Rexsilient.Notifier.notify(:closed, :circuit_breaker, %{
             name: name,
             from: :probing,
@@ -454,8 +454,8 @@ defmodule Rexsilient.CircuitBreaker do
     case Map.fetch(state, name) do
       {:ok, %{ref: ref, strategy: {strategy, strategy_state}}} ->
         {state_counter, status} = unpack(:atomics.get(ref, @state))
-        :ok = :atomics.put(ref, @state, pack(state_counter + 1, @closed))
         :ok = strategy.reset(strategy_state)
+        :ok = :atomics.put(ref, @state, pack(state_counter + 1, @closed))
         notify_transition(name, get_status(status), :closed, %{forced: true})
         {:reply, :ok, state}
 

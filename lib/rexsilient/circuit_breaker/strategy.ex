@@ -51,7 +51,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy do
   @doc """
   Forgets the results recorded so far.
 
-  Called when the breaker closes.
+  Called just before the breaker closes.
   """
   @callback reset(state :: state()) :: :ok
 end

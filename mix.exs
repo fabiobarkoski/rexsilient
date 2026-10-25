@@ -58,15 +58,17 @@ defmodule Rexsilient.MixProject do
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:benchee, "~> 1.5", only: :bench},
-      {:fuse, "~> 2.5", only: :bench},
       {:telemetry, "~> 1.4"}
     ]
   end
 
   defp aliases do
     [
-      bench_stress: "run benchmarks/stress.exs",
-      bench_fuse_stress: "run benchmarks/fuse_stress.exs"
+      bench_circuit_breaker: "run benchmarks/circuit_breaker.exs"
     ]
+  end
+
+  def cli do
+    [preferred_envs: [bench_circuit_breaker: :bench]]
   end
 end
