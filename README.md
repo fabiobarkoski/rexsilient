@@ -18,7 +18,7 @@ tree, such as databases, APIs and other services.
 | Timeout | Give up on calls that take too long | Planned |
 | Bulkhead | Limit concurrent calls to a dependency | Planned |
 
-The full documentation is at [rexsilient.hexdocs.pm](https://rexsilient.hexdocs.pm/readme.html).
+Read the [full documentation](https://rexsilient.hexdocs.pm/readme.html) on hexdocs.pm.
 
 ## Installation
 
