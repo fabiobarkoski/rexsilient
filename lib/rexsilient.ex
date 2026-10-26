@@ -1,17 +1,22 @@
 defmodule Rexsilient do
   @moduledoc """
-  Rexsilient is a resilience toolkit for Elixir.
+  Rexsilient is a resilience toolkit for Elixir. Its patterns protect the calls
+  an application makes to its dependencies:
 
-  It provides patterns that let an application handle failing dependencies
-  gracefully. The circuit breaker is the first one; see
-  `Rexsilient.CircuitBreaker` for how breakers behave and how to call them.
+    * `Rexsilient.CircuitBreaker` - stops calling a dependency that keeps
+      failing.
 
-  ## Declaring breakers
+    * `Rexsilient.Retry` - calls a function again when it fails, with backoff.
 
-  Breakers are declared in any module that uses `Rexsilient`. A module may
-  declare as many as needed, typically one per dependency:
+    * `Rexsilient.Fallback` - replaces the outcome of a failed call with the
+      result of another function.
 
-      defmodule MyApp.Breakers do
+  ## Declaring patterns
+
+  Patterns are declared in any module that uses `Rexsilient`. A module may
+  declare as many as needed, of any kind:
+
+      defmodule MyApp.Resilience do
         use Rexsilient
 
         alias Rexsilient.CircuitBreaker.{Recover, Strategy}
@@ -23,41 +28,74 @@ defmodule Rexsilient do
             probing_timeout: :timer.seconds(10)
         end
 
-        circuit_breaker :search do
-          strategy Strategy.Count, threshold: 10
-          recover Recover.BasicTimeout,
-            reset_timeout: :timer.seconds(5),
-            probing_timeout: :timer.seconds(2)
+        retry :payments do
+          attempts 4
+          strategy Rexsilient.Retry.Strategy.Exponential, base_delay: 100, max_delay: 5_000
         end
+
+        fallback :prices do
+          function :cached_price
+        end
+
+        def cached_price(sku), do: Cache.last_price(sku)
       end
 
-  Declarations are checked at compile time: a missing setting, or a setting
-  used outside `circuit_breaker/2`, fails compilation with an error that points
-  at the offending line. The options of each setting are checked when the
-  breaker is registered.
+  Declarations are checked at compile time: a missing required setting, a
+  setting used outside the block it belongs to, or one set twice fails
+  compilation with an error that points at the offending line. The options of
+  each setting are checked when the declaration is registered.
 
   The module is then passed to `Rexsilient` in your supervision tree, which
   registers its declarations when it starts:
 
       children = [
-        {Rexsilient, modules: [MyApp.Breakers]},
+        {Rexsilient, modules: [MyApp.Resilience]},
         MyAppWeb.Endpoint
       ]
 
   List it before the processes that use the declarations, so they exist when
-  they are first used.
+  they are first used. See `child_spec/1` for the options.
 
   ## Settings
 
-    * `strategy` - the module that decides when the breaker opens, and its
-      options. Required. See `strategy/2`.
+    * `circuit_breaker/2` - `strategy/2` and `recover/2`, required, and
+      `classify_with/1`.
 
-    * `recover` - the module that decides how long the breaker stays open
-      before it lets a probe call through, and how long a probe may run before
-      another one is let through, and its options. Required. See `recover/2`.
+    * `retry/2` - `attempts/1` and `strategy/2`, required, and
+      `classify_with/1`.
+
+    * `fallback/2` - `function/1`, required, and `classify_with/1`.
+
+    * `policy/2` - at least one of `fallback/1`, `retry/1` and
+      `circuit_breaker/1`.
 
   Modules and options are evaluated at compile time, so aliases and
   expressions such as `:timer.seconds(30)` are allowed.
+
+  ## Using patterns
+
+  The easiest way is to annotate the functions that call the dependency, with
+  `Rexsilient.Decorator`:
+
+      defmodule MyApp.Payments do
+        use Rexsilient.Decorator
+
+        @retry :payments
+        @circuit_breaker :payments
+        def charge(order) do
+          PaymentsClient.charge(order)
+        end
+      end
+
+  Without a decorator, calls go through `Rexsilient.CircuitBreaker.run/3`,
+  `Rexsilient.Retry.run/2` and `Rexsilient.Fallback.run/3`.
+
+  ## Classifying failures
+
+  `use Rexsilient` defines `classify/1` and `classify/2`, which decide which
+  outcomes count as failures for every pattern declared in the module: by
+  default, `:error`, `{:error, _}` and any raise, throw or exit. Override them,
+  or name other functions with `classify_with/1`; see `Rexsilient.Classify`.
   """
 
   @dialyzer {:no_return, function_error!: 2}
@@ -79,7 +117,7 @@ defmodule Rexsilient do
   ## Examples
 
       children = [
-        {Rexsilient, modules: [MyApp.Breakers], notifiers: [MyApp.Notifier]}
+        {Rexsilient, modules: [MyApp.Resilience], notifiers: [MyApp.Notifier]}
       ]
 
   """
@@ -173,6 +211,19 @@ defmodule Rexsilient do
   """
   defmacro recover(module, opts), do: setting(:recover, {module, opts}, __CALLER__)
 
+  @doc """
+  Declares a fallback called `name`.
+
+  `name` must be an atom, unique among all fallbacks registered on the node.
+  The block sets the fallback's settings; see `Rexsilient.Fallback`.
+
+  ## Examples
+
+      fallback :prices do
+        function :cached_price
+      end
+
+  """
   defmacro fallback(name, do: block) do
     declare(
       {:current_fallback, :fallbacks, [:function, :classify_with]},
@@ -183,8 +234,36 @@ defmodule Rexsilient do
     )
   end
 
+  @doc """
+  Sets the function a fallback calls when the call fails: a name, for a
+  function in the declaring module, or `{module, name}` for one in another
+  module. It is called with the same arguments as the failed call.
+
+  Can only be used inside `fallback/2`.
+
+  ## Examples
+
+      function :cached_price
+
+      function {MyApp.Cache, :last_price}
+
+  """
   defmacro function(func), do: setting(:function, func, __CALLER__)
 
+  @doc """
+  Declares a retry called `name`.
+
+  `name` must be an atom, unique among all retries registered on the node.
+  The block sets the retry's settings; see `Rexsilient.Retry`.
+
+  ## Examples
+
+      retry :payments do
+        attempts 4
+        strategy Rexsilient.Retry.Strategy.Exponential, base_delay: 100, max_delay: 5_000
+      end
+
+  """
   defmacro retry(name, do: block) do
     declare(
       {:current_retry, :retries, [:strategy, :attempts, :classify_with]},
@@ -195,6 +274,17 @@ defmodule Rexsilient do
     )
   end
 
+  @doc """
+  Sets the total number of calls a retry makes, the first one included: a
+  positive integer, or `:infinity` to leave the limit to the strategy.
+
+  Can only be used inside `retry/2`.
+
+  ## Examples
+
+      attempts 4
+
+  """
   defmacro attempts(number), do: setting(:attempts, number, __CALLER__)
 
   @doc """
@@ -269,6 +359,19 @@ defmodule Rexsilient do
   """
   defmacro retry(name), do: setting(:retry, name, __CALLER__)
 
+  @doc """
+  Sets the name of the functions, in the declaring module, that decide which
+  outcomes are failures, instead of `classify/1` and `classify/2`. A missing
+  `func_name/1` or `func_name/2` falls back to the `classify` one of the same
+  arity; see `Rexsilient.Classify`.
+
+  Can only be used inside `circuit_breaker/2`, `fallback/2` or `retry/2`.
+
+  ## Examples
+
+      classify_with :classify_payments
+
+  """
   defmacro classify_with(func_name), do: setting(:classify_with, func_name, __CALLER__)
 
   defp declare(current_block, name, block, required_macros, caller) do

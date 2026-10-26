@@ -15,10 +15,20 @@ defmodule Rexsilient.Retry do
         end
       end
 
-  and used with `run/2`, or with `@retry :payments` from
-  `Rexsilient.Decorator`:
+  and used with `@retry :payments` from `Rexsilient.Decorator`:
 
-      Rexsilient.Retry.run(:payments, fn -> Payments.charge(order) end)
+      defmodule MyApp.Payments do
+        use Rexsilient.Decorator
+
+        @retry :payments
+        def charge(order) do
+          PaymentsClient.charge(order)
+        end
+      end
+
+  or, without a decorator, with `run/2`:
+
+      Rexsilient.Retry.run(:payments, fn -> PaymentsClient.charge(order) end)
 
   ## Settings
 

@@ -38,7 +38,7 @@ defmodule Rexsilient.Retry.Strategy.Exponential do
       if Keyword.keyword?(opts), do: Keyword.pop(opts, :jitter, :none), else: {:none, opts}
 
     state =
-      Rexsilient.Utils.validate!(opts,
+      Rexsilient.Options.validate!(opts,
         base_delay: :non_neg_integer,
         max_delay: :non_neg_integer
       )

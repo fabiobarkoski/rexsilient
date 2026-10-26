@@ -34,6 +34,22 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   > closed. Take care with what it does.
 
   Built-in: `Rexsilient.CircuitBreaker.Recover.BasicTimeout`.
+
+  ## Example
+
+      defmodule MyRecover do
+        @behaviour Rexsilient.CircuitBreaker.Recover
+
+        @impl true
+        def init(_opts), do: 1_000
+
+        @impl true
+        def timeout(_context, timeout), do: {timeout, timeout * 2}
+      end
+
+  Each `timeout/2` gets the state the previous one returned: 1000, 2000,
+  4000, and so on. It only starts again from `init/1` when the manager
+  restarts.
   """
   alias Rexsilient.{CircuitBreaker, Classify}
 
@@ -67,9 +83,10 @@ defmodule Rexsilient.CircuitBreaker.Recover do
   @doc """
   Validates `opts` and returns the initial state.
 
-  Called when the breaker is registered, and again when the manager
-  restarts. Raise `ArgumentError` for invalid options; the error is raised
-  again with the breaker's name.
+  Called when the circuit breaker is registered, and again when the manager
+  restarts. Raise `ArgumentError` for invalid options, as
+  `Rexsilient.Options.validate!/2` does; the error is raised again with the
+  circuit breaker's name.
   """
   @callback init(opts :: keyword()) :: state()
 

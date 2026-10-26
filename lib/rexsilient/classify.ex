@@ -3,13 +3,13 @@ defmodule Rexsilient.Classify do
   Decides whether the outcome of a call counts as a failure.
 
   Every module that uses `Rexsilient` implements this behaviour, and the
-  breakers it declares use it. The defaults count `:error` and `{:error, _}`
-  returns, and every raise, throw or exit, as failures; any other return
-  counts as a success.
+  circuit breakers, retries and fallbacks it declares use it. The defaults
+  count `:error` and `{:error, _}` returns, and every raise, throw or exit, as
+  failures; any other return counts as a success.
 
   Override `classify/1` to change how returned values are classified:
 
-      defmodule MyApp.Breakers do
+      defmodule MyApp.Resilience do
         use Rexsilient
 
         circuit_breaker :payments do
@@ -30,8 +30,12 @@ defmodule Rexsilient.Classify do
       def classify(:error, %Mint.TransportError{}), do: :failure
       def classify(_kind, _reason), do: :success
 
-  The exception is re-raised unchanged either way; only how it is counted
-  changes.
+  Circuit breakers and retries re-raise the exception unchanged either way;
+  only how it is counted changes. A fallback replaces it when it counts as a
+  failure, and re-raises it otherwise.
+
+  To classify one declaration differently from the others in the same module,
+  name other functions with `Rexsilient.classify_with/1`.
   """
 
   @typedoc "Whether a call succeeded or failed."

@@ -32,7 +32,7 @@ defmodule Rexsilient.CircuitBreaker.Strategy.SlidingWindow do
   @impl true
   def init(opts) do
     %{threshold: threshold, window: window} =
-      Rexsilient.Utils.validate!(opts, threshold: :pos_integer, window: :pos_integer)
+      Rexsilient.Options.validate!(opts, threshold: :pos_integer, window: :pos_integer)
 
     slots = threshold - 1
 

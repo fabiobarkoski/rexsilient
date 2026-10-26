@@ -15,10 +15,21 @@ defmodule Rexsilient.Fallback do
         def cached_price(sku), do: Cache.last_price(sku)
       end
 
-  and used with `run/3`, or with `@fallback :prices` from
-  `Rexsilient.Decorator`:
+  and used with `@fallback :prices` from `Rexsilient.Decorator`, which calls
+  the fallback function with the decorated function's arguments:
 
-      Rexsilient.Fallback.run(:prices, fn sku -> Prices.fetch(sku) end, sku)
+      defmodule MyApp.Prices do
+        use Rexsilient.Decorator
+
+        @fallback :prices
+        def fetch(sku) do
+          PricesClient.fetch(sku)
+        end
+      end
+
+  or, without a decorator, with `run/3`:
+
+      Rexsilient.Fallback.run(:prices, fn sku -> PricesClient.fetch(sku) end, sku)
 
   ## Settings
 

@@ -7,8 +7,9 @@ defmodule Rexsilient.Jitter do
   randomness to the delay, called *jitter*, spreads the retries out so the
   dependency is not flooded when it comes back.
 
-  Each function implements one strategy. They grow the delay exponentially
-  with each attempt, starting from `base_delay` and never going above
+  Each function implements one strategy. `full/3` and `equal/3` grow the
+  delay exponentially with each attempt, starting from `base_delay`;
+  `decorrelated/3` bases each delay on the previous one. None goes above
   `max_delay`. Delays are in whatever unit `base_delay` and `max_delay` use,
   usually milliseconds.
   """

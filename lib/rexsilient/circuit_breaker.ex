@@ -8,9 +8,35 @@ defmodule Rexsilient.CircuitBreaker do
   after too many failures, rejects them immediately until the dependency has
   had time to recover.
 
-  Breakers are declared with `Rexsilient` and called with `run/3`:
+  A circuit breaker is declared in a module that uses `Rexsilient`:
 
-      case Rexsilient.CircuitBreaker.run(:payments, fn -> Payments.charge(order) end) do
+      defmodule MyApp.Resilience do
+        use Rexsilient
+
+        alias Rexsilient.CircuitBreaker.{Recover, Strategy}
+
+        circuit_breaker :payments do
+          strategy Strategy.Count, threshold: 5
+          recover Recover.BasicTimeout,
+            reset_timeout: :timer.seconds(30),
+            probing_timeout: :timer.seconds(10)
+        end
+      end
+
+  and used with `@circuit_breaker :payments` from `Rexsilient.Decorator`:
+
+      defmodule MyApp.Payments do
+        use Rexsilient.Decorator
+
+        @circuit_breaker :payments
+        def charge(order) do
+          PaymentsClient.charge(order)
+        end
+      end
+
+  or, without a decorator, with `run/3`:
+
+      case Rexsilient.CircuitBreaker.run(:payments, fn -> PaymentsClient.charge(order) end) do
         {:ok, receipt} -> {:ok, receipt}
         {:error, :circuit_open} -> {:error, :payments_unavailable}
         {:error, reason} -> {:error, reason}
@@ -52,7 +78,7 @@ defmodule Rexsilient.CircuitBreaker do
   in your supervision tree with the modules that declare them:
 
       children = [
-        {Rexsilient, modules: [MyApp.Breakers]}
+        {Rexsilient, modules: [MyApp.Resilience]}
       ]
 
   Checking a breaker does not involve the manager: it is a single atomic read
@@ -139,11 +165,13 @@ defmodule Rexsilient.CircuitBreaker do
   a `Retry-After` header. It is optional; without it, the `recover` module
   gets `nil`.
 
-  Call it exactly once for every successful `acquire/1`, including when the
-  call raises. If the call was a probe and is not released in time, the
-  breaker stays in `:probing`, rejecting calls, until the probing timeout set
-  by its `recover` module makes it half-open again. See `acquire/1` for an
-  example.
+  > #### Release every acquire {: .info}
+  >
+  > Call it exactly once for every successful `acquire/1`, including when the
+  > call raises. If the call was a probe and is not released in time, the
+  > breaker stays in `:probing`, rejecting calls, until the probing timeout set
+  > by its `recover` module makes it half-open again. See `acquire/1` for an
+  > example.
 
   The result is recorded in the calling process, so a call that opens or
   closes the breaker is reflected by `status/1` as soon as `release/4`

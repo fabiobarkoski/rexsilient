@@ -28,7 +28,7 @@ defmodule Rexsilient.Retry.Strategy.Decorrelated do
   @impl true
   def init(opts) do
     state =
-      Rexsilient.Utils.validate!(opts, base_delay: :pos_integer, max_delay: :pos_integer)
+      Rexsilient.Options.validate!(opts, base_delay: :pos_integer, max_delay: :pos_integer)
 
     if state.max_delay < state.base_delay,
       do: raise(ArgumentError, "max_delay must not be less than base_delay")

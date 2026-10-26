@@ -1,11 +1,11 @@
 defmodule Rexsilient.Decorator do
   @moduledoc """
-  Runs a function through a [circuit breaker](`Rexsilient.CircuitBreaker`)
+  Runs a function through a circuit breaker, a retry, a fallback or a policy
   by annotating it.
 
   Instead of wrapping every call in `Rexsilient.CircuitBreaker.run/3`, a
   function can be marked with `@circuit_breaker` so that all its calls go
-  through the breaker:
+  through the circuit breaker:
 
       defmodule MyApp.Payments do
         use Rexsilient.Decorator
@@ -20,18 +20,25 @@ defmodule Rexsilient.Decorator do
 
       Rexsilient.CircuitBreaker.run(:payments, fn -> PaymentsClient.charge(order) end)
 
-  The breaker must be declared with `Rexsilient` and registered as usual; see
-  `Rexsilient.CircuitBreaker` for its results and how failures are counted.
+  The circuit breaker must be declared with `Rexsilient` and registered as
+  usual; see `Rexsilient.CircuitBreaker` for its results and how failures are
+  counted.
+
+  `@retry` and `@fallback` work the same way, with `Rexsilient.Retry.run/2`
+  and `Rexsilient.Fallback.run/3`. The fallback function is called with the
+  decorated function's arguments.
 
   ## Options
 
   To pass options to `Rexsilient.CircuitBreaker.run/3`, give a keyword list
-  with the breaker name under `:name`:
+  with the circuit breaker's name under `:name`:
 
       @circuit_breaker name: :prices, on_open: {:error, :unavailable}
       def fetch_price(sku) do
         PricesClient.fetch(sku)
       end
+
+  `@retry`, `@fallback` and `@policy` take only a name.
 
   ## Stacking
 
@@ -100,7 +107,7 @@ defmodule Rexsilient.Decorator do
       macro fails compilation, and so does an attribute that is not followed
       by a function.
 
-    * Recursive calls from inside the function go through the breaker too.
+    * Recursive calls from inside the function go through the decorators too.
 
   """
 

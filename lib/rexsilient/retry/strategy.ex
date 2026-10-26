@@ -20,6 +20,21 @@ defmodule Rexsilient.Retry.Strategy do
   Built-in strategies: `Rexsilient.Retry.Strategy.Constant`,
   `Rexsilient.Retry.Strategy.Exponential` and
   `Rexsilient.Retry.Strategy.Decorrelated`.
+
+  ## Example
+
+      defmodule MyStrategy do
+        @behaviour Rexsilient.Retry.Strategy
+
+        @impl true
+        def init(_opts), do: 100
+
+        @impl true
+        def delay(_context, delay), do: {:retry, delay, delay * 2}
+      end
+
+  Within a run, it waits 100, 200, 400, and so on. Every run starts again from
+  the `100` returned by `init/1`.
   """
   alias Rexsilient.Classify
 
@@ -44,7 +59,8 @@ defmodule Rexsilient.Retry.Strategy do
   Validates `opts` and returns the initial state.
 
   Called when the retry is registered. Raise `ArgumentError` for invalid
-  options; the error is raised again with the retry's name.
+  options, as `Rexsilient.Options.validate!/2` does; the error is raised
+  again with the retry's name.
   """
   @callback init(opts :: keyword()) :: state()
 

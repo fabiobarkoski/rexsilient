@@ -104,10 +104,12 @@ defmodule Rexsilient.Notifier do
   5 seconds is killed, and the timeout is logged. Either way it is skipped for that notification, and
   the others are not affected.
 
-  Notifications wait in the notifier process's mailbox, which has no limit.
-  When they arrive faster than the notifiers handle them, for example with a
-  notifier that takes a few milliseconds under high traffic, they arrive
-  later and later, and the mailbox, and so memory, keeps growing.
+  > #### The notifier mailbox has no limit {: .warning}
+  >
+  > Notifications wait in the notifier process's mailbox, which has no limit.
+  > When they arrive faster than the notifiers handle them, for example with a
+  > notifier that takes a few milliseconds under high traffic, they arrive
+  > later and later, and the mailbox, and so memory, keeps growing.
 
   `Rexsilient.Notifier.TelemetryNotifier`, the default, is the exception: it
   is called in the calling process, like any `:telemetry` event, so its
